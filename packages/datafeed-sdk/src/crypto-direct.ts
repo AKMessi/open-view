@@ -253,34 +253,76 @@ export class BinanceDirectDatafeed implements IDatafeed {
   subscribeQuotes(symbols: string[], onQuote: (quote: QuoteTick) => void): () => void {
     const spotTickers = symbols
       .filter((s) => s.startsWith('BINANCE:') && !s.endsWith('.P'))
-      .map((s) => s.slice('BINANCE:'.length).toLowerCase());
+      .map((s) => s.slice('BINANCE:'.length).toUpperCase());
     if (spotTickers.length === 0) return () => {};
 
-    const streams = spotTickers.map((t) => `${t}@miniTicker`).join('/');
-    const ws = new WebSocket(`wss://data-stream.binance.vision/stream?streams=${streams}`);
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(String(ev.data)) as {
-          data?: { s: string; c: string; o: string; v: string; E: number };
-        };
-        if (!msg.data) return;
-        const last = Number(msg.data.c);
-        const open = Number(msg.data.o);
-        const change = last - open;
-        const changePct = open !== 0 ? (change / open) * 100 : 0;
-        onQuote({
-          symbol: `BINANCE:${msg.data.s}`,
-          last,
-          change,
-          changePct,
-          volume: Number(msg.data.v),
-          timestamp: msg.data.E,
-          feedQuality: 'live_full_vol',
-        });
-      } catch {
-        // ignore
-      }
+    let closed = false;
+
+    // Immediate REST 24hr snapshot so prices populate in < 200ms before first WS tick
+    const encoded = encodeURIComponent(JSON.stringify(spotTickers));
+    void fetch(`https://data-api.binance.vision/api/v3/ticker/24hr?symbols=${encoded}`, {
+      signal: AbortSignal.timeout(4000),
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((raw: unknown) => {
+        if (closed || !Array.isArray(raw)) return;
+        const rows = raw as Array<{ symbol: string; lastPrice: string; priceChange: string; priceChangePercent: string; volume: string }>;
+        const now = Date.now();
+        for (const r of rows) {
+          onQuote({
+            symbol: `BINANCE:${r.symbol}`,
+            last: Number(r.lastPrice),
+            change: Number(r.priceChange),
+            changePct: Number(r.priceChangePercent),
+            volume: Number(r.volume),
+            timestamp: now,
+            feedQuality: 'live_full_vol',
+          });
+        }
+      })
+      .catch(() => {});
+
+    const streams = spotTickers.map((t) => `${t.toLowerCase()}@miniTicker`).join('/');
+    let ws: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (closed) return;
+      ws = new WebSocket(`wss://data-stream.binance.vision/stream?streams=${streams}`);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(String(ev.data)) as {
+            data?: { s: string; c: string; o: string; v: string; E: number };
+          };
+          if (!msg.data) return;
+          const last = Number(msg.data.c);
+          const open = Number(msg.data.o);
+          const change = last - open;
+          const changePct = open !== 0 ? (change / open) * 100 : 0;
+          onQuote({
+            symbol: `BINANCE:${msg.data.s}`,
+            last,
+            change,
+            changePct,
+            volume: Number(msg.data.v),
+            timestamp: msg.data.E,
+            feedQuality: 'live_full_vol',
+          });
+        } catch {
+          // ignore
+        }
+      };
+      ws.onclose = () => {
+        if (!closed) retryTimer = setTimeout(connect, 2500);
+      };
+      ws.onerror = () => ws?.close();
     };
-    return () => ws.close();
+
+    connect();
+    return () => {
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws?.close();
+    };
   }
 }

@@ -9,6 +9,14 @@ import {
 import type { FeedQualityBadge, OHLCVBar, QuoteTick, Resolution, SymbolInfo } from '@openview/protocol';
 import type { CredentialVault, SealedSecretRecord } from '../security/vault.ts';
 import type { DbWorkerClient } from '../workers/db-client.ts';
+import {
+  fetchYahooIntradayBars,
+  fetchYahooLatestQuote,
+  subscribeAlpacaLiveWs,
+  subscribeFinnhubLiveWs,
+  subscribePolledLiveBar,
+  subscribeTiingoFxWs,
+} from './live-streams.ts';
 import { TokenBucketRateLimiter } from './rate-limiter.ts';
 
 export type ProviderId =
@@ -152,10 +160,16 @@ export class MarketDataRouter {
 
   private readonly db: DbWorkerClient;
   private readonly vault: CredentialVault;
+  private readonly lastBarByKey = new Map<string, OHLCVBar>();
 
   constructor(db: DbWorkerClient, vault: CredentialVault) {
     this.db = db;
     this.vault = vault;
+  }
+
+  private rememberTail(symbolId: string, resolution: Resolution, bars: readonly OHLCVBar[]): void {
+    const tail = bars[bars.length - 1];
+    if (tail) this.lastBarByKey.set(`${symbolId.toUpperCase()}|${resolution}`, { ...tail });
   }
 
   private async getProviderCreds(provider: ProviderId): Promise<Record<string, string> | null> {
@@ -230,8 +244,25 @@ export class MarketDataRouter {
         }
       }
 
+      const yahooFx = await fetchYahooIntradayBars(baseSym, resolution);
+      if (yahooFx.bars.length > 0) {
+        const finalBars =
+          resolution === '3' || resolution === '45' || resolution === '120' || resolution === '240'
+            ? rollupBars(yahooFx.bars, resolution, baseSym.calendarId)
+            : yahooFx.bars;
+        this.rememberTail(baseSym.id, resolution, finalBars);
+        await this.reconcileAndCache(baseSym, resolution, finalBars);
+        return {
+          symbolInfo: { ...baseSym, provider: 'yahoo_fx', feedQuality: 'live_quote_zero_vol' },
+          bars: finalBars.slice(-count),
+          noMoreHistory: true,
+          providerLabel: 'Live FX/Gold Public Feed',
+        };
+      }
+
       const stooqBars = await this.fetchStooqDaily(baseSym.ticker.toLowerCase(), count, beforeTime);
       if (stooqBars.length > 0) {
+        this.rememberTail(baseSym.id, resolution, stooqBars);
         await this.reconcileAndCache(baseSym, '1D', stooqBars);
         return {
           symbolInfo: { ...baseSym, provider: 'stooq_eod', feedQuality: 'delayed_eod' },
@@ -242,13 +273,14 @@ export class MarketDataRouter {
       }
     }
 
-    // 3. US EQUITIES: Alpaca v2 -> Massive -> Stooq EOD baseline
+    // 3. US EQUITIES: Alpaca v2 -> Massive -> Yahoo Real Intraday -> Stooq EOD baseline
     if (baseSym.calendarId === 'US_EQUITY') {
       const alpaca = await this.getProviderCreds('alpaca');
       if (alpaca?.apiKey && alpaca?.apiSecret && this.limiters.get('alpaca')?.tryConsume()) {
         const feed = (alpaca.feed ?? 'iex').toLowerCase() === 'sip' ? 'sip' : 'iex';
         const bars = await this.fetchAlpacaBars(baseSym, resolution, alpaca.apiKey, alpaca.apiSecret, feed, count);
         if (bars.length > 0) {
+          this.rememberTail(baseSym.id, resolution, bars);
           await this.reconcileAndCache(baseSym, resolution, bars);
           const quality: FeedQualityBadge = feed === 'sip' ? 'live_full_vol' : 'live_subset_vol';
           return {
@@ -264,6 +296,7 @@ export class MarketDataRouter {
       if (massive?.apiKey) {
         const bars = await this.fetchMassiveBars(baseSym, resolution, massive.apiKey, count);
         if (bars.length > 0) {
+          this.rememberTail(baseSym.id, resolution, bars);
           await this.reconcileAndCache(baseSym, resolution, bars);
           return {
             symbolInfo: { ...baseSym, provider: 'massive', feedQuality: 'live_full_vol' },
@@ -274,8 +307,25 @@ export class MarketDataRouter {
         }
       }
 
+      const yahooUs = await fetchYahooIntradayBars(baseSym, resolution);
+      if (yahooUs.bars.length > 0) {
+        const finalBars =
+          resolution === '3' || resolution === '45' || resolution === '120' || resolution === '240'
+            ? rollupBars(yahooUs.bars, resolution, baseSym.calendarId)
+            : yahooUs.bars;
+        this.rememberTail(baseSym.id, resolution, finalBars);
+        await this.reconcileAndCache(baseSym, resolution, finalBars);
+        return {
+          symbolInfo: { ...baseSym, provider: 'yahoo_us', feedQuality: 'delayed_eod' },
+          bars: finalBars.slice(-count),
+          noMoreHistory: true,
+          providerLabel: 'US Equities Public Intraday',
+        };
+      }
+
       const stooqBars = await this.fetchStooqDaily(`${baseSym.ticker.toLowerCase()}.us`, count, beforeTime);
       if (stooqBars.length > 0) {
+        this.rememberTail(baseSym.id, resolution, stooqBars);
         await this.reconcileAndCache(baseSym, '1D', stooqBars);
         return {
           symbolInfo: { ...baseSym, provider: 'stooq_eod', feedQuality: 'delayed_eod' },
@@ -286,7 +336,7 @@ export class MarketDataRouter {
       }
     }
 
-    // 4. INDIAN NSE & MCX: Upstox v3 -> Fyers v3 -> Yahoo/Stooq NSE EOD baseline
+    // 4. INDIAN NSE & MCX: Upstox v3 -> Fyers v3 -> Yahoo NSE/MCX Real Intraday
     if (baseSym.calendarId === 'NSE' || baseSym.calendarId === 'MCX') {
       const upstox = await this.getProviderCreds('upstox');
       if (upstox?.accessToken && this.limiters.get('upstox')?.tryConsume()) {
@@ -297,6 +347,7 @@ export class MarketDataRouter {
             resolution === '60' || resolution === '240'
               ? rollupBars(bars, resolution, baseSym.calendarId)
               : bars;
+          this.rememberTail(baseSym.id, resolution, normalized);
           await this.reconcileAndCache(baseSym, resolution, normalized);
           return {
             symbolInfo: {
@@ -319,6 +370,7 @@ export class MarketDataRouter {
             resolution === '60' || resolution === '240'
               ? rollupBars(bars, resolution, baseSym.calendarId)
               : bars;
+          this.rememberTail(baseSym.id, resolution, normalized);
           await this.reconcileAndCache(baseSym, resolution, normalized);
           return {
             symbolInfo: {
@@ -333,14 +385,19 @@ export class MarketDataRouter {
         }
       }
 
-      const yahooBars = await this.fetchYahooPublicFallback(baseSym, resolution);
-      if (yahooBars.length > 0) {
-        await this.reconcileAndCache(baseSym, resolution, yahooBars);
+      const yahooNse = await fetchYahooIntradayBars(baseSym, resolution);
+      if (yahooNse.bars.length > 0) {
+        const finalBars =
+          resolution === '3' || resolution === '45' || resolution === '120' || resolution === '240'
+            ? rollupBars(yahooNse.bars, resolution, baseSym.calendarId)
+            : yahooNse.bars;
+        this.rememberTail(baseSym.id, resolution, finalBars);
+        await this.reconcileAndCache(baseSym, resolution, finalBars);
         return {
-          symbolInfo: { ...baseSym, provider: 'nse_delayed', feedQuality: 'delayed_eod' },
-          bars: yahooBars,
+          symbolInfo: { ...baseSym, provider: 'nse_public', feedQuality: 'delayed_eod' },
+          bars: finalBars.slice(-count),
           noMoreHistory: true,
-          providerLabel: 'NSE Delayed/EOD Baseline',
+          providerLabel: 'NSE/MCX Public Intraday',
         };
       }
     }
@@ -376,11 +433,205 @@ export class MarketDataRouter {
     if (sym.market === 'crypto' || sym.id.startsWith('BINANCE:')) {
       return this.cryptoDirect.subscribeBars(sym, resolution, onBar);
     }
-    return () => {};
+
+    const seedBar = this.lastBarByKey.get(`${sym.id.toUpperCase()}|${resolution}`);
+    let disposed = false;
+    let innerUnsub: (() => void) | null = null;
+
+    void (async () => {
+      // 1. FOREX & GOLD: Tiingo Live FX WS -> OANDA v20 Live Pricing -> Zero-Key Public Live Feed
+      if (sym.calendarId === 'FOREX_OTC') {
+        const tiingo = await this.getProviderCreds('tiingo');
+        if (disposed) return;
+        if (tiingo?.apiKey) {
+          innerUnsub = subscribeTiingoFxWs(sym, resolution, tiingo.apiKey, onBar, seedBar);
+          return;
+        }
+        const oanda = await this.getProviderCreds('oanda');
+        if (disposed) return;
+        if (oanda?.apiToken && oanda?.accountId) {
+          const inst = `${sym.ticker.slice(0, 3)}_${sym.ticker.slice(3)}`;
+          const base = oanda.environment === 'live' ? 'https://api-fxtrade.oanda.com' : 'https://api-fxpractice.oanda.com';
+          innerUnsub = subscribePolledLiveBar(
+            sym,
+            resolution,
+            1500,
+            'live_quote_zero_vol',
+            async () => {
+              const res = await fetch(`${base}/v3/accounts/${encodeURIComponent(oanda.accountId!)}/pricing?instruments=${inst}`, {
+                headers: { Authorization: `Bearer ${oanda.apiToken}` },
+                signal: AbortSignal.timeout(3500),
+              });
+              if (!res.ok) return null;
+              const j = (await res.json()) as { prices?: Array<{ bids?: Array<{ price: string }>; asks?: Array<{ price: string }> }> };
+              const p0 = j.prices?.[0];
+              const bid = Number(p0?.bids?.[0]?.price);
+              const ask = Number(p0?.asks?.[0]?.price);
+              if (!Number.isFinite(bid) || !Number.isFinite(ask)) return null;
+              return { price: (bid + ask) * 0.5, timestamp: Date.now() };
+            },
+            onBar,
+            seedBar,
+          );
+          return;
+        }
+      }
+
+      // 2. US EQUITIES: Alpaca Live WS (IEX/SIP) -> Finnhub Live WS -> Zero-Key Public Live Feed
+      if (sym.calendarId === 'US_EQUITY') {
+        const alpaca = await this.getProviderCreds('alpaca');
+        if (disposed) return;
+        if (alpaca?.apiKey && alpaca?.apiSecret) {
+          const feed = (alpaca.feed ?? 'iex').toLowerCase() === 'sip' ? 'sip' : 'iex';
+          innerUnsub = subscribeAlpacaLiveWs(sym, resolution, alpaca.apiKey, alpaca.apiSecret, feed, onBar, seedBar);
+          return;
+        }
+        const finnhub = await this.getProviderCreds('finnhub');
+        if (disposed) return;
+        if (finnhub?.apiKey) {
+          innerUnsub = subscribeFinnhubLiveWs(sym, resolution, finnhub.apiKey, onBar, seedBar);
+          return;
+        }
+      }
+
+      // 3. INDIAN NSE & MCX: Upstox v3 LTP -> Fyers v3 Quotes -> Zero-Key Public Live Feed
+      if (sym.calendarId === 'NSE' || sym.calendarId === 'MCX') {
+        const upstox = await this.getProviderCreds('upstox');
+        if (disposed) return;
+        if (upstox?.accessToken) {
+          const key =
+            sym.ticker === 'NIFTY'
+              ? 'NSE_INDEX|Nifty 50'
+              : sym.ticker === 'BANKNIFTY'
+                ? 'NSE_INDEX|Nifty Bank'
+                : `NSE_EQ|${sym.ticker.replace(/1!$/, '')}`;
+          const quality: FeedQualityBadge = sym.hasVolume ? 'live_full_vol' : 'live_quote_zero_vol';
+          innerUnsub = subscribePolledLiveBar(
+            sym,
+            resolution,
+            1500,
+            quality,
+            async () => {
+              const res = await fetch(`https://api.upstox.com/v3/market-quote/ltp?instrument_key=${encodeURIComponent(key)}`, {
+                headers: { Authorization: `Bearer ${upstox.accessToken}`, Accept: 'application/json' },
+                signal: AbortSignal.timeout(3500),
+              });
+              if (!res.ok) return null;
+              const j = (await res.json()) as { data?: Record<string, { last_price?: number }> };
+              const first = Object.values(j.data ?? {})[0];
+              if (!first || typeof first.last_price !== 'number') return null;
+              return { price: first.last_price, timestamp: Date.now() };
+            },
+            onBar,
+            seedBar,
+          );
+          return;
+        }
+
+        const fyers = await this.getProviderCreds('fyers');
+        if (disposed) return;
+        if (fyers?.appId && fyers?.accessToken) {
+          const fyersSym =
+            sym.ticker === 'NIFTY'
+              ? 'NSE:NIFTY50-INDEX'
+              : sym.ticker === 'BANKNIFTY'
+                ? 'NSE:NIFTYBANK-INDEX'
+                : `NSE:${sym.ticker.replace(/1!$/, '')}-EQ`;
+          const quality: FeedQualityBadge = sym.hasVolume ? 'live_full_vol' : 'live_quote_zero_vol';
+          innerUnsub = subscribePolledLiveBar(
+            sym,
+            resolution,
+            1500,
+            quality,
+            async () => {
+              const res = await fetch(`https://api-t1.fyers.in/data/quotes?symbols=${encodeURIComponent(fyersSym)}`, {
+                headers: { Authorization: `${fyers.appId}:${fyers.accessToken}` },
+                signal: AbortSignal.timeout(3500),
+              });
+              if (!res.ok) return null;
+              const j = (await res.json()) as { d?: Array<{ v?: { lp?: number; volume?: number } }> };
+              const lp = j.d?.[0]?.v?.lp;
+              if (typeof lp !== 'number') return null;
+              return { price: lp, timestamp: Date.now() };
+            },
+            onBar,
+            seedBar,
+          );
+          return;
+        }
+      }
+
+      if (disposed) return;
+
+      // 4. Zero-Key Real Public Live Polling (works immediately out-of-the-box for ALL FX/Gold/US/NSE!)
+      const fallbackQuality: FeedQualityBadge =
+        sym.calendarId === 'FOREX_OTC' ? 'live_quote_zero_vol' : 'delayed_eod';
+      innerUnsub = subscribePolledLiveBar(
+        sym,
+        resolution,
+        4000,
+        fallbackQuality,
+        async () => {
+          const q = await fetchYahooLatestQuote(sym);
+          if (!q) return null;
+          return { price: q.last, timestamp: q.timestamp };
+        },
+        onBar,
+        seedBar,
+      );
+    })();
+
+    return () => {
+      disposed = true;
+      innerUnsub?.();
+      innerUnsub = null;
+    };
   }
 
   subscribeLiveQuotes(symbols: string[], onQuote: (q: QuoteTick) => void): () => void {
-    return this.cryptoDirect.subscribeQuotes(symbols, onQuote);
+    const cryptoSyms = symbols.filter((s) => s.startsWith('BINANCE:'));
+    const otherSyms = symbols
+      .filter((s) => !s.startsWith('BINANCE:'))
+      .map((s) => findSymbolById(s))
+      .filter((s): s is SymbolInfo => s !== null);
+
+    const unsubCrypto =
+      cryptoSyms.length > 0 ? this.cryptoDirect.subscribeQuotes(cryptoSyms, onQuote) : () => {};
+
+    if (otherSyms.length === 0) return unsubCrypto;
+
+    let stopped = false;
+    let inFlight = false;
+
+    const pollQuotes = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        // Fetch live public quotes in small parallel waves so all 4 markets populate immediately
+        const batchSize = 5;
+        for (let i = 0; i < otherSyms.length; i += batchSize) {
+          if (stopped) break;
+          const batch = otherSyms.slice(i, i + batchSize);
+          await Promise.all(
+            batch.map(async (sym) => {
+              const q = await fetchYahooLatestQuote(sym);
+              if (!stopped && q) onQuote(q);
+            }),
+          );
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void pollQuotes();
+    const timer = setInterval(() => void pollQuotes(), 6000);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      unsubCrypto();
+    };
   }
 
   private async reconcileAndCache(
@@ -652,80 +903,6 @@ export class MarketDataRouter {
         bars = bars.filter((b) => b.time < beforeTime);
       }
       return bars.slice(-count);
-    } catch {
-      return [];
-    }
-  }
-
-  private async fetchYahooPublicFallback(symbol: SymbolInfo, resolution: Resolution): Promise<OHLCVBar[]> {
-    try {
-      const ySym =
-        symbol.ticker === 'NIFTY'
-          ? '^NSEI'
-          : symbol.ticker === 'BANKNIFTY'
-            ? '^NSEBANK'
-            : symbol.ticker.endsWith('1!')
-              ? symbol.ticker === 'NIFTY1!'
-                ? '^NSEI'
-                : '^NSEBANK'
-              : `${symbol.ticker}.NS`;
-      const interval =
-        resolution === '1'
-          ? '1m'
-          : resolution === '5'
-            ? '5m'
-            : resolution === '15'
-              ? '15m'
-              : resolution === '60'
-                ? '60m'
-                : '1d';
-      const range = interval === '1d' ? '2y' : interval === '1m' ? '5d' : '30d';
-      const res = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySym)}?interval=${interval}&range=${range}`,
-        {
-          headers: { 'User-Agent': 'OpenView/0.1' },
-          signal: AbortSignal.timeout(4500),
-        },
-      );
-      if (!res.ok) return [];
-      const json = (await res.json()) as {
-        chart?: {
-          result?: Array<{
-            timestamp?: number[];
-            indicators?: {
-              quote?: Array<{
-                open?: Array<number | null>;
-                high?: Array<number | null>;
-                low?: Array<number | null>;
-                close?: Array<number | null>;
-                volume?: Array<number | null>;
-              }>;
-            };
-          }>;
-        };
-      };
-      const r0 = json.chart?.result?.[0];
-      const ts = r0?.timestamp ?? [];
-      const q = r0?.indicators?.quote?.[0];
-      if (!q || ts.length === 0) return [];
-      const out: OHLCVBar[] = [];
-      for (let i = 0; i < ts.length; i++) {
-        const o = q.open?.[i];
-        const h = q.high?.[i];
-        const l = q.low?.[i];
-        const c = q.close?.[i];
-        const v = q.volume?.[i] ?? 0;
-        if (o == null || h == null || l == null || c == null) continue;
-        out.push({
-          time: ts[i]! * 1000,
-          open: o,
-          high: h,
-          low: l,
-          close: c,
-          volume: symbol.hasVolume ? v : 0,
-        });
-      }
-      return out;
     } catch {
       return [];
     }
