@@ -311,6 +311,40 @@ export class MarketClient {
     }).catch(() => {});
   }
 
+  async fetchHistory(
+    symbolId: string,
+    resolution: Resolution,
+    count = 400,
+  ): Promise<{ symbolInfo: SymbolInfo; bars: OHLCVBar[] } | null> {
+    if (this.token) {
+      try {
+        const qs = new URLSearchParams({ symbol: symbolId, resolution, count: String(count) });
+        const res = await fetch(`${BRIDGE_HTTP}/api/v1/history?${qs.toString()}`, {
+          credentials: 'include',
+          headers: { 'x-openview-token': this.token },
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { symbolInfo: SymbolInfo; bars: OHLCVBar[] };
+          if (data.bars.length > 0) return data;
+        }
+      } catch {
+        // Fall through to direct / synthetic fallback
+      }
+    }
+
+    const sym = findSymbolById(symbolId);
+    if (!sym) return null;
+    if (sym.market === 'crypto' || sym.id.startsWith('BINANCE:')) {
+      try {
+        const res = await this.cryptoDirect.getBars({ symbol: sym, resolution, countBack: count });
+        if (res.bars.length > 0) return { symbolInfo: sym, bars: res.bars };
+      } catch {
+        // fallback below
+      }
+    }
+    return { symbolInfo: sym, bars: generateSyntheticBars(sym, resolution, count, sym.id.length * 19) };
+  }
+
   dispose(): void {
     for (const id of [...this.chartHandlers.keys()]) this.unsubscribeChart(id);
     this.directQuoteUnsub?.();

@@ -22,6 +22,8 @@ export interface StrategyTesterDrawerProps {
   open: boolean;
   symbolTicker: string;
   bars: readonly OHLCVBar[];
+  isSyntheticChart?: boolean;
+  chartModeLabel?: string;
   isDark: boolean;
   onClose: () => void;
 }
@@ -30,6 +32,8 @@ export default function StrategyTesterDrawer({
   open,
   symbolTicker,
   bars,
+  isSyntheticChart = false,
+  chartModeLabel,
   isDark,
   onClose,
 }: StrategyTesterDrawerProps) {
@@ -152,6 +156,15 @@ export default function StrategyTesterDrawer({
           </button>
         </div>
       </div>
+
+      {isSyntheticChart && (
+        <div className="flex items-center gap-2 border-b border-[#f7931a]/40 bg-[#f7931a]/15 px-3 py-1 text-[11px] font-medium text-[#f7931a]">
+          <span>⚠ Synthetic-Fill Warning ({chartModeLabel ?? 'Non-Time / Heikin Ashi'}):</span>
+          <span className="text-[#f5c26b]">
+            Synthetic chart prices differ from executable market OHLCV prices. Switch to Standard Candles for production-grade fill realism.
+          </span>
+        </div>
+      )}
 
       {!report ? (
         <div className="flex flex-1 items-center justify-center text-xs text-[#787b86]">

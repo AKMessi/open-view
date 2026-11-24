@@ -375,10 +375,29 @@ export class DrawingManager {
       case 'price_range':
       case 'date_price_range':
       case 'fib_retracement':
+      case 'gann_box':
+      case 'fib_time_zones':
+      case 'fib_speed_fan':
+      case 'gann_fan':
+      case 'cyclic_lines':
+      case 'regression_trend':
+      case 'fixed_range_vp':
         if (!p1) return false;
         return distancePointToRectEdge(p, p0, p1) <= BODY_HIT_RADIUS_PX || pointInRectBounds(p, p0, p1, 0);
       case 'circle':
+      case 'fib_circles':
         return p1 ? distancePointToCircleBorder(p, p0, p1) <= BODY_HIT_RADIUS_PX : false;
+      case 'andrews_pitchfork':
+      case 'schiff_pitchfork':
+      case 'modified_schiff_pitchfork':
+      case 'inside_pitchfork': {
+        if (!p1 || !p2) return false;
+        const mid: Point2D = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
+        return (
+          distancePointToLineMode(p, p0, mid, 'ray') <= BODY_HIT_RADIUS_PX ||
+          distancePointToLineMode(p, p1, p2, 'segment') <= BODY_HIT_RADIUS_PX
+        );
+      }
       case 'long_position':
       case 'short_position':
         if (!p1 || !p2) return false;
@@ -389,7 +408,11 @@ export class DrawingManager {
       case 'brush':
       case 'highlighter':
       case 'polyline':
-      case 'triangle': {
+      case 'triangle':
+      case 'elliott_impulse_12345':
+      case 'elliott_correction_abc':
+      case 'harmonic_xabcd':
+      case 'head_and_shoulders': {
         for (let i = 1; i < pts.length; i++) {
           if (distancePointToLineMode(p, pts[i - 1]!, pts[i]!, 'segment') <= BODY_HIT_RADIUS_PX) {
             return true;
@@ -812,6 +835,234 @@ export class DrawingManager {
         ctx.arc(p0.x, p0.y, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        break;
+      }
+      case 'fib_circles': {
+        if (!p1) break;
+        const baseR = distancePointToPoint(p0, p1);
+        for (const mult of [0.382, 0.618, 1, 1.618, 2.618]) {
+          ctx.beginPath();
+          ctx.arc(p0.x, p0.y, baseR * mult, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        break;
+      }
+      case 'andrews_pitchfork':
+      case 'schiff_pitchfork':
+      case 'modified_schiff_pitchfork':
+      case 'inside_pitchfork': {
+        if (!p1 || !p2) break;
+        const mid: Point2D = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
+        let origin = p0;
+        if (d.type === 'schiff_pitchfork') origin = { x: p0.x, y: (p0.y + p1.y) * 0.5 };
+        else if (d.type === 'modified_schiff_pitchfork') origin = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
+        else if (d.type === 'inside_pitchfork') origin = { x: (p0.x + mid.x) * 0.5, y: (p0.y + mid.y) * 0.5 };
+
+        const dx = mid.x - origin.x;
+        const dy = mid.y - origin.y;
+        const len = Math.max(1e-3, Math.hypot(dx, dy));
+        const ext = paneRect.width + paneRect.height;
+        const ux = (dx / len) * ext;
+        const uy = (dy / len) * ext;
+
+        // Median + Upper/Lower prongs + handle
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.moveTo(origin.x, origin.y);
+        ctx.lineTo(origin.x + ux, origin.y + uy);
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p1.x + ux, p1.y + uy);
+        ctx.moveTo(p2.x, p2.y);
+        ctx.lineTo(p2.x + ux, p2.y + uy);
+        ctx.stroke();
+        break;
+      }
+      case 'gann_box': {
+        if (!p1) break;
+        const rx = Math.min(p0.x, p1.x);
+        const ry = Math.min(p0.y, p1.y);
+        const rw = Math.abs(p1.x - p0.x);
+        const rh = Math.abs(p1.y - p0.y);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        for (const r of [0.25, 0.5, 0.75]) {
+          ctx.beginPath();
+          ctx.moveTo(rx + rw * r, ry);
+          ctx.lineTo(rx + rw * r, ry + rh);
+          ctx.moveTo(rx, ry + rh * r);
+          ctx.lineTo(rx + rw, ry + rh * r);
+          ctx.stroke();
+        }
+        // Diagonals
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx + rw, ry + rh);
+        ctx.moveTo(rx, ry + rh);
+        ctx.lineTo(rx + rw, ry);
+        ctx.stroke();
+        ctx.restore();
+        break;
+      }
+      case 'gann_fan':
+      case 'fib_speed_fan': {
+        if (!p1) break;
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const ratios = d.type === 'gann_fan' ? [0.25, 0.5, 1, 2, 4] : [0.25, 0.382, 0.5, 0.618, 0.75, 1];
+        for (const r of ratios) {
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p0.x + dx * 4, p0.y + dy * r * 4);
+          ctx.stroke();
+        }
+        break;
+      }
+      case 'fib_time_zones':
+      case 'cyclic_lines': {
+        if (!p1) break;
+        const stepX = p1.x - p0.x;
+        if (Math.abs(stepX) < 2) break;
+        const mults = d.type === 'fib_time_zones' ? [0, 1, 2, 3, 5, 8, 13, 21, 34] : [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        for (const m of mults) {
+          const x = p0.x + stepX * m;
+          if (x < paneRect.x || x > paneRect.x + paneRect.width) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, paneRect.y);
+          ctx.lineTo(x, paneRect.y + paneRect.height);
+          ctx.stroke();
+        }
+        break;
+      }
+      case 'regression_trend': {
+        if (!p1) break;
+        const i0 = Math.min(bridge.timeToIndex(d.anchors[0]!.time), bridge.timeToIndex(d.anchors[1]!.time));
+        const i1 = Math.max(bridge.timeToIndex(d.anchors[0]!.time), bridge.timeToIndex(d.anchors[1]!.time));
+        const xs: number[] = [];
+        const ys: number[] = [];
+        for (let idx = i0; idx <= i1; idx++) {
+          const b = bridge.getBar(idx);
+          if (b) { xs.push(idx); ys.push(b.close); }
+        }
+        if (xs.length < 2) break;
+        const n = xs.length;
+        const meanX = xs.reduce((a, b) => a + b, 0) / n;
+        const meanY = ys.reduce((a, b) => a + b, 0) / n;
+        let num = 0;
+        let den = 0;
+        for (let k = 0; k < n; k++) {
+          num += (xs[k]! - meanX) * (ys[k]! - meanY);
+          den += (xs[k]! - meanX) ** 2;
+        }
+        const slope = den > 0 ? num / den : 0;
+        const intercept = meanY - slope * meanX;
+        let ss = 0;
+        for (let k = 0; k < n; k++) {
+          const pred = intercept + slope * xs[k]!;
+          ss += (ys[k]! - pred) ** 2;
+        }
+        const std = Math.sqrt(ss / n);
+        const yStart = intercept + slope * i0;
+        const yEnd = intercept + slope * i1;
+        const x0 = bridge.indexToX(i0);
+        const x1 = bridge.indexToX(i1);
+        for (const mult of [-2, 0, 2]) {
+          ctx.save();
+          if (mult !== 0) ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x0, bridge.priceToY(yStart + mult * std));
+          ctx.lineTo(x1, bridge.priceToY(yEnd + mult * std));
+          ctx.stroke();
+          ctx.restore();
+        }
+        break;
+      }
+      case 'fixed_range_vp': {
+        if (!p1) break;
+        const i0 = Math.min(bridge.timeToIndex(d.anchors[0]!.time), bridge.timeToIndex(d.anchors[1]!.time));
+        const i1 = Math.max(bridge.timeToIndex(d.anchors[0]!.time), bridge.timeToIndex(d.anchors[1]!.time));
+        const rx = Math.min(p0.x, p1.x);
+        const rw = Math.max(24, Math.abs(p1.x - p0.x));
+        let minP = Infinity;
+        let maxP = -Infinity;
+        const slice: OHLCVBar[] = [];
+        for (let idx = i0; idx <= i1; idx++) {
+          const b = bridge.getBar(idx);
+          if (!b) continue;
+          slice.push(b);
+          if (b.low < minP) minP = b.low;
+          if (b.high > maxP) maxP = b.high;
+        }
+        if (slice.length === 0 || maxP <= minP) break;
+        const bins = 24;
+        const step = (maxP - minP) / bins;
+        const volBins = new Float64Array(bins);
+        for (const b of slice) {
+          const v = b.volume > 0 ? b.volume : 1;
+          const b0 = Math.max(0, Math.min(bins - 1, Math.floor((b.low - minP) / step)));
+          const b1 = Math.max(b0, Math.min(bins - 1, Math.floor((b.high - minP) / step)));
+          const per = v / (b1 - b0 + 1);
+          for (let k = b0; k <= b1; k++) volBins[k] = volBins[k]! + per;
+        }
+        let maxV = 0;
+        let pocIdx = 0;
+        for (let k = 0; k < bins; k++) {
+          if (volBins[k]! > maxV) { maxV = volBins[k]!; pocIdx = k; }
+        }
+        const barMaxW = rw * 0.45;
+        for (let k = 0; k < bins; k++) {
+          const yTop = bridge.priceToY(minP + (k + 1) * step);
+          const yBot = bridge.priceToY(minP + k * step);
+          const w = maxV > 0 ? (volBins[k]! / maxV) * barMaxW : 0;
+          ctx.fillStyle = k === pocIdx ? 'rgba(247, 147, 26, 0.7)' : 'rgba(41, 98, 255, 0.35)';
+          ctx.fillRect(rx, Math.min(yTop, yBot), w, Math.max(1, Math.abs(yBot - yTop) - 1));
+        }
+        const pocY = bridge.priceToY(minP + (pocIdx + 0.5) * step);
+        ctx.strokeStyle = '#f7931a';
+        ctx.beginPath();
+        ctx.moveTo(rx, pocY);
+        ctx.lineTo(rx + rw, pocY);
+        ctx.stroke();
+        break;
+      }
+      case 'elliott_impulse_12345':
+      case 'elliott_correction_abc':
+      case 'harmonic_xabcd':
+      case 'head_and_shoulders': {
+        if (pts.length < 2) break;
+        const labels =
+          d.type === 'elliott_impulse_12345'
+            ? ['0', '1', '2', '3', '4', '5']
+            : d.type === 'elliott_correction_abc'
+              ? ['0', 'A', 'B', 'C']
+              : d.type === 'harmonic_xabcd'
+                ? ['X', 'A', 'B', 'C', 'D']
+                : ['L', 'LS', 'N1', 'H', 'N2', 'RS', 'R'];
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y);
+        ctx.stroke();
+        if (d.type === 'harmonic_xabcd' && pts.length >= 5) {
+          ctx.fillStyle = `${color}22`;
+          ctx.beginPath();
+          ctx.moveTo(pts[0]!.x, pts[0]!.y);
+          ctx.lineTo(pts[1]!.x, pts[1]!.y);
+          ctx.lineTo(pts[2]!.x, pts[2]!.y);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(pts[2]!.x, pts[2]!.y);
+          ctx.lineTo(pts[3]!.x, pts[3]!.y);
+          ctx.lineTo(pts[4]!.x, pts[4]!.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.font = '700 11px monospace';
+        ctx.fillStyle = color;
+        for (let i = 0; i < pts.length; i++) {
+          ctx.fillText(labels[i] ?? String(i), pts[i]!.x + 4, pts[i]!.y - 6);
+        }
         break;
       }
       case 'long_position':

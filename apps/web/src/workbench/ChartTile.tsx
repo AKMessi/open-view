@@ -4,6 +4,16 @@ import {
   generateSyntheticBars,
   type FrameTelemetry,
 } from '@openview/chart-engine';
+import {
+  buildHistoricalIntrabarFootprint,
+  buildTpoProfile,
+  buildVolumeProfile,
+  evaluateSpreadBars,
+  parseSpreadExpression,
+  transformNonTimeBars,
+  type NonTimeChartMode,
+  type SpreadAlignmentMode,
+} from '@openview/chart-types';
 import { findSymbolById } from '@openview/datafeed-sdk';
 import type { PaperAccountSnapshot } from '@openview/broker-sdk';
 import type { DrawingManager } from '@openview/drawings';
@@ -24,6 +34,11 @@ interface ChartTileProps {
   isMaximized: boolean;
   bridgeOnlineMode: 'connecting' | 'local_bridge' | 'static_mode';
   theme: 'dark' | 'light';
+  chartMode: NonTimeChartMode;
+  showVrvp: boolean;
+  showFootprint: boolean;
+  showTpo: boolean;
+  spreadAlignment: SpreadAlignmentMode;
   activeIndicatorIds: string[];
   customScriptCode: string | null;
   scriptRunNonce: number;
@@ -50,12 +65,40 @@ interface ChartTileProps {
 
 const QUICK_COLORS = ['#2962ff', '#089981', '#f23645', '#f7931a', '#ab47bc', '#d1d4dc'];
 
+function makeSpreadSymbol(expr: string): SymbolInfo {
+  return {
+    id: `SPREAD:${expr}`,
+    ticker: expr,
+    description: `Synthetic Spread (${expr})`,
+    exchange: 'SPREAD',
+    provider: 'synthetic_spread',
+    market: 'index',
+    segment: 'index',
+    currency: 'RATIO',
+    timezone: 'UTC',
+    calendarId: 'CRYPTO',
+    tickSize: 0.001,
+    precision: 3,
+    lotSize: 1,
+    hasVolume: false,
+    supportsOrderbook: false,
+    supportsTicks: false,
+    feedQuality: 'live_quote_zero_vol',
+    symlogLinthresh: 0.1,
+  };
+}
+
 export function ChartTile({
   tile,
   isActive,
   isMaximized,
   bridgeOnlineMode,
   theme,
+  chartMode,
+  showVrvp,
+  showFootprint,
+  showTpo,
+  spreadAlignment,
   activeIndicatorIds,
   customScriptCode,
   scriptRunNonce,
@@ -81,10 +124,17 @@ export function ChartTile({
 }: ChartTileProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<ChartController | null>(null);
-  const symbolRef = useRef<SymbolInfo>(findSymbolById(tile.symbol)!);
+  const symbolRef = useRef<SymbolInfo>(
+    tile.symbol.startsWith('SPREAD:')
+      ? makeSpreadSymbol(tile.symbol.slice('SPREAD:'.length))
+      : findSymbolById(tile.symbol) ?? findSymbolById('BINANCE:BTCUSDT')!,
+  );
+  const rawBarsRef = useRef<OHLCVBar[]>([]);
   const barsRef = useRef<OHLCVBar[]>([]);
   const paperAccountRef = useRef<PaperAccountSnapshot | undefined>(paperAccount);
   paperAccountRef.current = paperAccount;
+  const overlayFlagsRef = useRef({ showVrvp, showFootprint, showTpo });
+  overlayFlagsRef.current = { showVrvp, showFootprint, showTpo };
   const mountedSubPanesRef = useRef<Set<string>>(new Set());
   const [drawRev, setDrawRev] = useState(0);
 
@@ -92,7 +142,9 @@ export function ChartTile({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const initSym = findSymbolById(tile.symbol)!;
+    const initSym = tile.symbol.startsWith('SPREAD:')
+      ? makeSpreadSymbol(tile.symbol.slice('SPREAD:'.length))
+      : findSymbolById(tile.symbol) ?? findSymbolById('BINANCE:BTCUSDT')!;
     symbolRef.current = initSym;
 
     const ctrl = new ChartController({
@@ -110,6 +162,157 @@ export function ChartTile({
     ctrl.setOverlayRenderers(
       (ctx) => {
         const bridge = ctrl.getMainCoordBridge();
+        const flags = overlayFlagsRef.current;
+
+        // ── Institutional Orderflow & Market Profile Overlays (Zero extra DOM canvases!) ──
+        if (flags.showVrvp || flags.showFootprint || flags.showTpo) {
+          const vis = ctrl.getVisibleBarRange();
+          if (vis) {
+            const visibleBars: OHLCVBar[] = [];
+            for (let idx = vis.from; idx <= vis.to; idx++) {
+              const b = bridge.getBar(idx);
+              if (b) visibleBars.push(b);
+            }
+
+            if (visibleBars.length > 0) {
+              ctx.save();
+              ctx.setTransform(bridge.horizontalPixelRatio, 0, 0, bridge.verticalPixelRatio, 0, 0);
+              ctx.beginPath();
+              ctx.rect(bridge.paneRect.x, bridge.paneRect.y, bridge.paneRect.width, bridge.paneRect.height);
+              ctx.clip();
+
+              // 1. Visible Range Volume Profile (VRVP) docked on right edge
+              if (flags.showVrvp) {
+                const vp = buildVolumeProfile(visibleBars, 28);
+                const maxBarW = Math.min(130, bridge.paneRect.width * 0.22);
+                const rightX = bridge.paneRect.x + bridge.paneRect.width - 2;
+                for (const row of vp.rows) {
+                  if (vp.maxRowVol <= 0) continue;
+                  const yTop = bridge.priceToY(row.priceHigh);
+                  const yBot = bridge.priceToY(row.priceLow);
+                  const h = Math.max(1.5, Math.abs(yBot - yTop) - 1);
+                  const totalW = (row.totalVol / vp.maxRowVol) * maxBarW;
+                  const upW = row.totalVol > 0 ? (row.upVol / row.totalVol) * totalW : 0;
+                  const dnW = totalW - upW;
+                  const inVa = row.price >= vp.val && row.price <= vp.vah;
+
+                  ctx.fillStyle = inVa ? 'rgba(8, 153, 129, 0.34)' : 'rgba(8, 153, 129, 0.14)';
+                  ctx.fillRect(rightX - totalW, Math.min(yTop, yBot), upW, h);
+                  ctx.fillStyle = inVa ? 'rgba(242, 54, 69, 0.34)' : 'rgba(242, 54, 69, 0.14)';
+                  ctx.fillRect(rightX - dnW, Math.min(yTop, yBot), dnW, h);
+                }
+
+                // POC + VAH / VAL lines
+                const pocY = bridge.priceToY(vp.pocPrice);
+                ctx.strokeStyle = '#f7931a';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(bridge.paneRect.x, pocY);
+                ctx.lineTo(rightX, pocY);
+                ctx.stroke();
+
+                ctx.save();
+                ctx.setLineDash([4, 4]);
+                ctx.strokeStyle = 'rgba(41, 98, 255, 0.65)';
+                ctx.lineWidth = 1;
+                for (const level of [vp.vah, vp.val]) {
+                  const ly = bridge.priceToY(level);
+                  ctx.beginPath();
+                  ctx.moveTo(bridge.paneRect.x, ly);
+                  ctx.lineTo(rightX, ly);
+                  ctx.stroke();
+                }
+                ctx.restore();
+              }
+
+              // 2. Historical 1m-Intrabar Footprint Cluster Overlay (Honest Approx Badge)
+              if (flags.showFootprint) {
+                const slice = visibleBars.slice(-20);
+                const startIdx = Math.max(vis.from, vis.to - slice.length + 1);
+                let minP = Infinity;
+                let maxP = -Infinity;
+                for (const b of slice) {
+                  if (b.low < minP) minP = b.low;
+                  if (b.high > maxP) maxP = b.high;
+                }
+                const step = Math.max(symbolRef.current.tickSize, (maxP - minP) / 14);
+                const fps = buildHistoricalIntrabarFootprint(slice, step);
+                ctx.font = '600 9px monospace';
+                ctx.textBaseline = 'middle';
+
+                for (let k = 0; k < fps.length; k++) {
+                  const fp = fps[k]!;
+                  const cx = bridge.indexToX(startIdx + k);
+                  for (const row of fp.rows) {
+                    const y = bridge.priceToY(row.price);
+                    const isPoc = Math.abs(row.price - fp.pocPrice) <= step * 0.5;
+                    ctx.fillStyle = row.buyImbalance
+                      ? 'rgba(8, 153, 129, 0.45)'
+                      : row.sellImbalance
+                        ? 'rgba(242, 54, 69, 0.45)'
+                        : 'rgba(30, 34, 45, 0.72)';
+                    ctx.fillRect(cx - 24, y - 6, 48, 12);
+                    if (isPoc) {
+                      ctx.strokeStyle = '#f7931a';
+                      ctx.lineWidth = 1;
+                      ctx.strokeRect(cx - 24, y - 6, 48, 12);
+                    }
+                    ctx.fillStyle = '#e5e7eb';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(
+                      `${Math.round(row.bidVol)}×${Math.round(row.askVol)}`,
+                      cx,
+                      y,
+                    );
+                  }
+                }
+
+                // Honest Mode B indicator badge
+                ctx.fillStyle = 'rgba(247, 147, 26, 0.22)';
+                ctx.fillRect(bridge.paneRect.x + 10, bridge.paneRect.y + 34, 188, 18);
+                ctx.fillStyle = '#f7931a';
+                ctx.textAlign = 'left';
+                ctx.fillText('FOOTPRINT · 1M INTRABAR (APPROX)', bridge.paneRect.x + 16, bridge.paneRect.y + 43);
+              }
+
+              // 3. TPO Market Profile Letters + Initial Balance Bracket
+              if (flags.showTpo) {
+                const tpo = buildTpoProfile(visibleBars);
+                const leftX = bridge.paneRect.x + 12;
+                ctx.font = '700 9.5px monospace';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+
+                // Initial Balance (IB) vertical bar
+                const ibTop = bridge.priceToY(tpo.ibHigh);
+                const ibBot = bridge.priceToY(tpo.ibLow);
+                ctx.strokeStyle = '#2962ff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(leftX - 5, ibTop);
+                ctx.lineTo(leftX - 5, ibBot);
+                ctx.stroke();
+
+                for (const row of tpo.rows) {
+                  const y = bridge.priceToY(row.price);
+                  const isPoc = Math.abs(row.price - tpo.pocPrice) < 1e-6;
+                  ctx.fillStyle = isPoc
+                    ? '#f7931a'
+                    : row.isSinglePrint
+                      ? '#ab47bc'
+                      : row.price >= tpo.val && row.price <= tpo.vah
+                        ? '#5b9cf6'
+                        : '#787b86';
+                  ctx.fillText(row.letters.slice(0, 18).join(''), leftX, y);
+                }
+              }
+
+              ctx.restore();
+            }
+          }
+        }
+
+        // Vector Drawings
         drawingManager.renderCommitted(ctx, symbolRef.current.id, bridge);
 
         // On-chart Visual Trading: render open Paper Position & Working Limit/SL/TP Order lines
@@ -198,7 +401,9 @@ export function ChartTile({
     });
 
     ctrl.onLoadMoreHistory((beforeTime) => {
-      if (!replayActive) client.requestMoreHistory(tile.id, beforeTime, 400);
+      if (!replayActive && !tile.symbol.startsWith('SPREAD:')) {
+        client.requestMoreHistory(tile.id, beforeTime, 400);
+      }
     });
 
     const unsubDraw = drawingManager.onChange(() => {
@@ -280,34 +485,73 @@ export function ChartTile({
       .catch(() => {});
   };
 
+  const applyModeAndRender = (
+    ctrl: ChartController,
+    raw: OHLCVBar[],
+    info: SymbolInfo,
+    fitCount = 140,
+  ) => {
+    rawBarsRef.current = raw;
+    const displayBars = chartMode === 'standard' ? raw : transformNonTimeBars(raw, chartMode);
+    barsRef.current = displayBars;
+    ctrl.setSymbolInfo(info, tile.resolution);
+    ctrl.setBars(displayBars, Math.min(fitCount, Math.max(40, displayBars.length)));
+    recomputeIndicators(ctrl, displayBars, info);
+    onBarsLoaded?.(displayBars, info);
+  };
+
   // Master-Clock Multi-TF Replay override
   useEffect(() => {
     const ctrl = controllerRef.current;
     if (!ctrl || !replayActive) return;
     const rolled = replayClock.getRolledUpSeries(tile.resolution, symbolRef.current.calendarId);
-    barsRef.current = rolled;
     const replayInfo: SymbolInfo = { ...symbolRef.current, feedQuality: 'replay' };
-    ctrl.setSymbolInfo(replayInfo, tile.resolution);
-    ctrl.setBars(rolled, Math.min(160, Math.max(40, rolled.length)));
-    recomputeIndicators(ctrl, rolled, replayInfo);
+    applyModeAndRender(ctrl, rolled, replayInfo, 160);
     onResolvedMeta?.(replayInfo, 'Master-Clock Replay');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replayActive, replayTickNonce, tile.resolution]);
+  }, [replayActive, replayTickNonce, tile.resolution, chartMode]);
 
-  // Live / Historical Datafeed Subscription
+  // Live / Historical / Synthetic Spread Datafeed Subscription
   useEffect(() => {
     const ctrl = controllerRef.current;
     if (!ctrl || bridgeOnlineMode === 'connecting' || replayActive) return;
 
     if (externalBarsOverride && isActive) {
       symbolRef.current = externalBarsOverride.symbol;
-      barsRef.current = externalBarsOverride.bars;
-      ctrl.setSymbolInfo(externalBarsOverride.symbol, tile.resolution);
-      ctrl.setBars(externalBarsOverride.bars, 160);
-      recomputeIndicators(ctrl, externalBarsOverride.bars, externalBarsOverride.symbol);
+      applyModeAndRender(ctrl, externalBarsOverride.bars, externalBarsOverride.symbol, 160);
       onResolvedMeta?.(externalBarsOverride.symbol, externalBarsOverride.label);
-      onBarsLoaded?.(externalBarsOverride.bars, externalBarsOverride.symbol);
       return;
+    }
+
+    // Synthetic Spread Mode (e.g., SPREAD:FX:XAUUSD/FX:XAGUSD)
+    if (tile.symbol.startsWith('SPREAD:')) {
+      const expr = tile.symbol.slice('SPREAD:'.length);
+      const spreadInfo = makeSpreadSymbol(expr);
+      symbolRef.current = spreadInfo;
+      let cancelled = false;
+
+      void (async () => {
+        try {
+          const parsed = parseSpreadExpression(expr);
+          const legSeries: Record<string, OHLCVBar[]> = {};
+          await Promise.all(
+            parsed.symbols.map(async (legSym) => {
+              const res = await client.fetchHistory(legSym, tile.resolution, 400);
+              if (res) legSeries[legSym] = res.bars;
+            }),
+          );
+          if (cancelled) return;
+          const spreadBars = evaluateSpreadBars(expr, legSeries, spreadAlignment);
+          applyModeAndRender(ctrl, spreadBars, spreadInfo, 160);
+          onResolvedMeta?.(spreadInfo, `Synthetic Spread (${spreadAlignment})`);
+        } catch {
+          // ignore malformed spread
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
     }
 
     const sym = findSymbolById(tile.symbol);
@@ -316,34 +560,35 @@ export function ChartTile({
 
     if (stress250k && isActive) {
       const bars = generateSyntheticBars(sym, tile.resolution, 250_000, 99);
-      barsRef.current = bars;
-      ctrl.setSymbolInfo(sym, tile.resolution);
-      ctrl.setBars(bars, 250_000);
-      recomputeIndicators(ctrl, bars, sym);
+      applyModeAndRender(ctrl, bars, sym, 250_000);
       onResolvedMeta?.(sym, '250k Mipmap Benchmark');
-      onBarsLoaded?.(bars, sym);
       return;
     }
 
     const unsub = client.subscribeChart(tile.id, tile.symbol, tile.resolution, {
       onSnapshot: (resolvedInfo, bars, _noMore, label) => {
         symbolRef.current = resolvedInfo;
-        barsRef.current = bars;
-        ctrl.setSymbolInfo(resolvedInfo, tile.resolution);
-        ctrl.setBars(bars, 140);
-        recomputeIndicators(ctrl, bars, resolvedInfo);
+        applyModeAndRender(ctrl, bars, resolvedInfo, 140);
         onResolvedMeta?.(resolvedInfo, label);
-        onBarsLoaded?.(bars, resolvedInfo);
       },
       onBarUpdate: (bar, quality) => {
-        ctrl.upsertBar(bar);
-        onLiveBarTick?.(symbolRef.current.id, bar);
-        const list = barsRef.current;
-        if (list.length > 0 && list[list.length - 1]!.time === bar.time) {
-          list[list.length - 1] = bar;
+        const rawList = rawBarsRef.current;
+        if (rawList.length > 0 && rawList[rawList.length - 1]!.time === bar.time) {
+          rawList[rawList.length - 1] = bar;
         } else {
-          list.push(bar);
+          rawList.push(bar);
         }
+
+        if (chartMode === 'standard') {
+          ctrl.upsertBar(bar);
+          barsRef.current = rawList;
+        } else {
+          const transformed = transformNonTimeBars(rawList, chartMode);
+          barsRef.current = transformed;
+          ctrl.setBars(transformed, Math.min(160, Math.max(40, transformed.length)));
+        }
+        onLiveBarTick?.(symbolRef.current.id, bar);
+
         if (symbolRef.current.feedQuality !== quality) {
           symbolRef.current = { ...symbolRef.current, feedQuality: quality };
           onResolvedMeta?.(symbolRef.current, symbolRef.current.provider);
@@ -351,16 +596,29 @@ export function ChartTile({
       },
       onHistoryResult: (olderBars) => {
         if (olderBars.length > 0) {
-          barsRef.current = [...olderBars, ...barsRef.current];
-          ctrl.prependBars(olderBars);
-          recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
+          rawBarsRef.current = [...olderBars, ...rawBarsRef.current];
+          if (chartMode === 'standard') {
+            barsRef.current = rawBarsRef.current;
+            ctrl.prependBars(olderBars);
+            recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
+          } else {
+            applyModeAndRender(ctrl, rawBarsRef.current, symbolRef.current, 160);
+          }
         }
       },
     });
 
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tile.symbol, tile.resolution, bridgeOnlineMode, stress250k, reloadNonce, externalBarsOverride, replayActive]);
+  }, [tile.symbol, tile.resolution, bridgeOnlineMode, stress250k, reloadNonce, externalBarsOverride, replayActive, spreadAlignment]);
+
+  // Re-transform bars immediately when chartMode switches (Standard <-> Renko/Range/Kagi/P&F/3LB)
+  useEffect(() => {
+    const ctrl = controllerRef.current;
+    if (!ctrl || rawBarsRef.current.length === 0) return;
+    applyModeAndRender(ctrl, rawBarsRef.current, symbolRef.current, 140);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartMode]);
 
   // Recompute WASM indicators whenever indicator list or custom script changes
   useEffect(() => {
@@ -388,7 +646,7 @@ export function ChartTile({
 
   useEffect(() => {
     controllerRef.current?.requestRedraw(true);
-  }, [paperAccount]);
+  }, [paperAccount, showVrvp, showFootprint, showTpo]);
 
   void drawRev;
   const selectedDrawing = isActive ? drawingManager.getSelected() : null;

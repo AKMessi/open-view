@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { searchCatalog } from '@openview/datafeed-sdk';
+import { isSpreadExpression, parseSpreadExpression, type SpreadAlignmentMode } from '@openview/chart-types';
+import { findSymbolById, searchCatalog } from '@openview/datafeed-sdk';
 import type { MarketCategory, SymbolInfo } from '@openview/protocol';
 
 interface SymbolSearchModalProps {
   open: boolean;
   initialQuery?: string;
+  spreadAlignment?: SpreadAlignmentMode;
+  onChangeSpreadAlignment?: (mode: SpreadAlignmentMode) => void;
   onClose: () => void;
   onSelect: (symbol: SymbolInfo) => void;
 }
@@ -18,9 +21,60 @@ const TABS: Array<{ id: MarketCategory | 'all'; label: string }> = [
   { id: 'futures', label: 'Futures (1!)' },
 ];
 
+function resolveSpreadSymbolToken(rawToken: string): string {
+  const exact = findSymbolById(rawToken);
+  if (exact) return exact.id;
+  const matches = searchCatalog(rawToken, 'all', 1);
+  return matches[0]?.id ?? rawToken;
+}
+
+function buildSpreadSymbolInfo(rawExpr: string): { sym: SymbolInfo; legs: string[] } | null {
+  if (!isSpreadExpression(rawExpr)) return null;
+  try {
+    const parsed = parseSpreadExpression(rawExpr);
+    if (parsed.symbols.length === 0) return null;
+    let normalizedExpr = parsed.expression;
+    const resolvedLegs: string[] = [];
+    for (const tok of parsed.symbols) {
+      const resolved = resolveSpreadSymbolToken(tok);
+      resolvedLegs.push(resolved);
+      if (resolved !== tok) {
+        normalizedExpr = normalizedExpr.split(tok).join(resolved);
+      }
+    }
+    return {
+      legs: resolvedLegs,
+      sym: {
+        id: `SPREAD:${normalizedExpr}`,
+        ticker: normalizedExpr,
+        description: `Synthetic Spread (${resolvedLegs.join(', ')})`,
+        exchange: 'SPREAD',
+        provider: 'synthetic_spread',
+        market: 'index',
+        segment: 'index',
+        currency: 'RATIO',
+        timezone: 'UTC',
+        calendarId: 'CRYPTO',
+        tickSize: 0.001,
+        precision: 3,
+        lotSize: 1,
+        hasVolume: false,
+        supportsOrderbook: false,
+        supportsTicks: false,
+        feedQuality: 'live_quote_zero_vol',
+        symlogLinthresh: 0.1,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function SymbolSearchModal({
   open,
   initialQuery = '',
+  spreadAlignment = 'ffill',
+  onChangeSpreadAlignment,
   onClose,
   onSelect,
 }: SymbolSearchModalProps) {
@@ -39,6 +93,7 @@ export function SymbolSearchModal({
 
   if (!open) return null;
 
+  const spreadCandidate = buildSpreadSymbolInfo(query);
   const results = searchCatalog(query, tab, 50);
 
   const handleKeyDown = (ev: React.KeyboardEvent) => {
@@ -50,10 +105,15 @@ export function SymbolSearchModal({
     } else if (ev.key === 'ArrowUp') {
       ev.preventDefault();
       setSelectedIdx((i) => Math.max(0, i - 1));
-    } else if (ev.key === 'Enter' && results[selectedIdx]) {
+    } else if (ev.key === 'Enter') {
       ev.preventDefault();
-      onSelect(results[selectedIdx]!);
-      onClose();
+      if (spreadCandidate) {
+        onSelect(spreadCandidate.sym);
+        onClose();
+      } else if (results[selectedIdx]) {
+        onSelect(results[selectedIdx]!);
+        onClose();
+      }
     }
   };
 
@@ -76,13 +136,48 @@ export function SymbolSearchModal({
               setQuery(e.target.value);
               setSelectedIdx(0);
             }}
-            placeholder="Search symbol across Crypto, Forex/Gold, US Stocks, India NSE/MCX (e.g. BTCUSDT, XAUUSD, NVDA, RELIANCE, NIFTY1!)"
+            placeholder="Search symbol or enter Synthetic Spread (e.g. XAUUSD/XAGUSD, ETHUSDT/BTCUSDT, BANKNIFTY/NIFTY)"
             className="w-full bg-transparent text-sm text-white outline-none placeholder:text-[#787b86]"
           />
           <kbd className="rounded border border-[#2a2e39] px-1.5 py-0.5 font-mono text-[10px] text-[#787b86]">
             ESC
           </kbd>
         </div>
+
+        {/* Synthetic Spread Preview Banner */}
+        {spreadCandidate && (
+          <div className="flex items-center justify-between border-b border-[#2962ff]/40 bg-[#2962ff]/10 px-4 py-2.5 text-xs">
+            <div>
+              <div className="font-mono font-semibold text-white">
+                Spread Formula: {spreadCandidate.sym.ticker}
+              </div>
+              <div className="text-[11px] text-[#868993]">
+                Clamped non-inverted wicks · Legs: {spreadCandidate.legs.join(' , ')}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {onChangeSpreadAlignment && (
+                <select
+                  value={spreadAlignment}
+                  onChange={(e) => onChangeSpreadAlignment(e.target.value as SpreadAlignmentMode)}
+                  className="rounded border border-[#2a2e39] bg-[#0b0e14] px-2 py-1 font-mono text-[10.5px] text-[#d1d4dc]"
+                >
+                  <option value="ffill">Align: Forward-Fill</option>
+                  <option value="inner_join">Align: Inner Join</option>
+                </select>
+              )}
+              <button
+                onClick={() => {
+                  onSelect(spreadCandidate.sym);
+                  onClose();
+                }}
+                className="rounded bg-[#2962ff] px-3 py-1 font-semibold text-white hover:bg-[#1e53e5]"
+              >
+                Open Spread ↵
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="flex gap-1 border-b border-[#2a2e39] px-3 py-2">
           {TABS.map((t) => (
@@ -106,7 +201,9 @@ export function SymbolSearchModal({
         <div className="flex-1 overflow-y-auto">
           {results.length === 0 ? (
             <div className="p-8 text-center text-xs text-[#787b86]">
-              No matching symbols. Try BTCUSDT, XAUUSD, EURUSD, NVDA, RELIANCE, or NIFTY1!.
+              {spreadCandidate
+                ? 'Press Enter to launch the Synthetic Spread chart above.'
+                : 'No matching symbols. Try BTCUSDT, XAUUSD, NVDA, RELIANCE, NIFTY1!, or a spread like XAUUSD/XAGUSD.'}
             </div>
           ) : (
             results.map((sym, idx) => (

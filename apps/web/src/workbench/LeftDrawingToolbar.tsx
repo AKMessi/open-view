@@ -25,11 +25,12 @@ interface LeftDrawingToolbarProps {
 
 const GROUPS: Array<{ id: DrawingToolGroup; icon: string; title: string; defaultTool: DrawingToolType }> = [
   { id: 'lines', icon: '╱', title: 'Lines & Rays', defaultTool: 'trendline' },
-  { id: 'channels', icon: '⫽', title: 'Channels', defaultTool: 'parallel_channel' },
-  { id: 'fibonacci', icon: '≡', title: 'Fibonacci', defaultTool: 'fib_retracement' },
+  { id: 'channels', icon: '⫽', title: 'Channels & Pitchforks', defaultTool: 'parallel_channel' },
+  { id: 'fibonacci', icon: '≡', title: 'Fibonacci & Gann', defaultTool: 'fib_retracement' },
+  { id: 'patterns', icon: '∿', title: 'Elliott, Harmonics & Cycles', defaultTool: 'harmonic_xabcd' },
   { id: 'shapes', icon: '▭', title: 'Geometric Shapes & Brush', defaultTool: 'rectangle' },
   { id: 'annotations', icon: 'T', title: 'Text & Annotations', defaultTool: 'text' },
-  { id: 'measure_rr', icon: '⊞', title: 'Long/Short R:R, Anchored VWAP & Measure', defaultTool: 'long_position' },
+  { id: 'measure_rr', icon: '⊞', title: 'R:R, Anchored VWAP, FRVP & Measure', defaultTool: 'long_position' },
 ];
 
 export function LeftDrawingToolbar({

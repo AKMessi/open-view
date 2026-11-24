@@ -2,6 +2,11 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { PaperBrokerEngine, type PaperAccountSnapshot } from '@openview/broker-sdk';
 import type { ChartController, FrameTelemetry } from '@openview/chart-engine';
 import {
+  isSyntheticPriceChart,
+  type NonTimeChartMode,
+  type SpreadAlignmentMode,
+} from '@openview/chart-types';
+import {
   DEFAULT_WATCHLIST_IDS,
   findSymbolById,
   parseCsvBars,
@@ -28,6 +33,7 @@ import { PINE_TEMPLATES } from '@openview/script-runtime';
 import { IndicatorPickerModal } from './modals/IndicatorPickerModal.tsx';
 import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
 import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
+import { DomLadderPanel } from './panels/DomLadderPanel.tsx';
 import { ObjectTreePanel } from './panels/ObjectTreePanel.tsx';
 import { OrderTicketPanel } from './panels/OrderTicketPanel.tsx';
 import { WatchlistPanel } from './panels/WatchlistPanel.tsx';
@@ -156,7 +162,12 @@ export function App() {
   const [replaySnap, setReplaySnap] = useState<ReplaySnapshot>(() => replayClockRef.current.getSnapshot());
   const [replayTickNonce, setReplayTickNonce] = useState(0);
 
-  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'trade' | 'none'>('watchlist');
+  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'trade' | 'dom' | 'none'>('watchlist');
+  const [chartMode, setChartMode] = useState<NonTimeChartMode>('standard');
+  const [showVrvp, setShowVrvp] = useState(false);
+  const [showFootprint, setShowFootprint] = useState(false);
+  const [showTpo, setShowTpo] = useState(false);
+  const [spreadAlignment, setSpreadAlignment] = useState<SpreadAlignmentMode>('ffill');
   const [stress250k, setStress250k] = useState(false);
   const [activeMeta, setActiveMeta] = useState<{ info: SymbolInfo; label: string }>({
     info: findSymbolById('BINANCE:BTCUSDT')!,
@@ -493,6 +504,54 @@ export function App() {
             ))}
           </select>
 
+          <select
+            value={chartMode}
+            onChange={(e) => setChartMode(e.target.value as NonTimeChartMode)}
+            title="Non-Time Chart Mode (1m-sourced Renko, Range, Kagi, P&F, 3-Line Break)"
+            className={`rounded border px-1.5 py-1 font-mono text-[11px] outline-none ${
+              chartMode !== 'standard'
+                ? 'border-[#f7931a]/60 bg-[#f7931a]/15 text-[#f7931a]'
+                : isDark
+                  ? 'border-[#2a2e39] bg-[#1e222d] text-[#d1d4dc]'
+                  : 'border-[#d1d4dc] bg-[#f0f3fa] text-[#131722]'
+            }`}
+          >
+            <option value="standard">Time Bars</option>
+            <option value="renko">Renko (ATR)</option>
+            <option value="range">Range Bars</option>
+            <option value="kagi">Kagi</option>
+            <option value="point_and_figure">Point &amp; Figure</option>
+            <option value="line_break">3-Line Break</option>
+          </select>
+
+          <button
+            onClick={() => setShowVrvp((v) => !v)}
+            className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
+              showVrvp ? 'bg-[#2962ff]/25 text-[#6aa0ff]' : 'text-[#787b86] hover:bg-[#1e222d]'
+            }`}
+            title="Visible Range Volume Profile (VRVP + POC/VAH/VAL)"
+          >
+            VP
+          </button>
+          <button
+            onClick={() => setShowFootprint((v) => !v)}
+            className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
+              showFootprint ? 'bg-[#f7931a]/25 text-[#f7931a]' : 'text-[#787b86] hover:bg-[#1e222d]'
+            }`}
+            title="Orderflow Footprint Cluster Overlay"
+          >
+            FP
+          </button>
+          <button
+            onClick={() => setShowTpo((v) => !v)}
+            className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
+              showTpo ? 'bg-[#ab47bc]/25 text-[#ce93d8]' : 'text-[#787b86] hover:bg-[#1e222d]'
+            }`}
+            title="TPO Market Profile (Letters + Initial Balance)"
+          >
+            TPO
+          </button>
+
           <div className="flex items-center gap-0.5">
             {SCALE_MODES.map((m) => (
               <button
@@ -680,6 +739,15 @@ export function App() {
           >
             TRADE
           </button>
+          <button
+            onClick={() => setRightTab((t) => (t === 'dom' ? 'none' : 'dom'))}
+            className={`rounded border border-[#2a2e39] px-1.5 py-1 text-[10.5px] ${
+              rightTab === 'dom' ? 'bg-[#2962ff] text-white' : 'text-[#868993]'
+            }`}
+            title="L2 Depth of Market Ladder"
+          >
+            DOM
+          </button>
           <span
             className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
               bridge.mode === 'local_bridge'
@@ -758,6 +826,11 @@ export function App() {
                 isMaximized={maximizedTileId === tile.id}
                 bridgeOnlineMode={bridge.mode}
                 theme={theme}
+                chartMode={chartMode}
+                showVrvp={showVrvp}
+                showFootprint={showFootprint}
+                showTpo={showTpo}
+                spreadAlignment={spreadAlignment}
                 activeIndicatorIds={activeIndicatorIds}
                 customScriptCode={activeScriptCode}
                 scriptRunNonce={scriptRunNonce}
@@ -831,6 +904,8 @@ export function App() {
                 open
                 symbolTicker={activeMeta.info.ticker}
                 bars={activeBarsRef.current}
+                isSyntheticChart={isSyntheticPriceChart(chartMode, activeTile.chartStyle)}
+                chartModeLabel={chartMode !== 'standard' ? chartMode.toUpperCase() : activeTile.chartStyle}
                 isDark={isDark}
                 onClose={() => setBottomDrawer('none')}
               />
@@ -855,6 +930,15 @@ export function App() {
             symbol={activeMeta.info}
             latestBar={latestActiveBar}
             account={paperAccount}
+            broker={paperBrokerRef.current}
+            isDark={isDark}
+          />
+        )}
+
+        {rightTab === 'dom' && (
+          <DomLadderPanel
+            symbol={activeMeta.info}
+            latestBar={latestActiveBar}
             broker={paperBrokerRef.current}
             isDark={isDark}
           />
@@ -892,6 +976,8 @@ export function App() {
       <SymbolSearchModal
         open={searchOpen}
         initialQuery={searchSeed}
+        spreadAlignment={spreadAlignment}
+        onChangeSpreadAlignment={setSpreadAlignment}
         onClose={() => setSearchOpen(false)}
         onSelect={(sym) => {
           setLocalFileOverride(null);

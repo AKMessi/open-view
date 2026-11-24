@@ -408,6 +408,15 @@ export class ChartController {
     return this.plotList.getBar(barIndex)?.time ?? null;
   }
 
+  getVisibleBarRange(): { from: number; to: number } | null {
+    if (this.plotList.length === 0) return null;
+    const vis = this.timeScale.getVisibleLogicalRange(
+      this.plotList.firstIndex(),
+      this.plotList.lastIndex(),
+    );
+    return { from: vis.from, to: vis.to };
+  }
+
   getMainCoordBridge() {
     const m = this.canvasPair?.metrics ?? {
       horizontalPixelRatio: 1,
