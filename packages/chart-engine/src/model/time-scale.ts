@@ -83,9 +83,11 @@ export class TimeScale {
   }
 
   scrollByPixels(dx: number, firstAvailableIndex: number): void {
-    // Dragging mouse right (+dx) moves chart right -> reveals older bars -> increases rightOffset
+    // Direct-manipulation TradingView pan:
+    // Dragging mouse LEFT (dx < 0) moves candles LEFT by dx -> reveals newer/right bars (increases rightOffset).
+    // Dragging mouse RIGHT (dx > 0) moves candles RIGHT by dx -> reveals older/left history (decreases rightOffset).
     const deltaBars = dx / this._barSpacing;
-    this.setRightOffset(this._rightOffset + deltaBars);
+    this.setRightOffset(this._rightOffset - deltaBars);
     this.clampScroll(firstAvailableIndex);
   }
 
@@ -122,9 +124,9 @@ export class TimeScale {
 
   private clampScroll(firstAvailableIndex: number): void {
     const visibleBars = this._width / this._barSpacing;
-    // Keep at least 2 bars visible on either edge so users can't lose the chart in infinite void
-    const minRightOffset = -Math.max(0, visibleBars - 3);
-    const maxRightOffset = Math.max(10, this._baseIndex - firstAvailableIndex + visibleBars - 3);
+    // Keep at least 3 bars visible on either edge so users can scroll full history without losing the chart
+    const minRightOffset = Math.min(-10, firstAvailableIndex - this._baseIndex + 3);
+    const maxRightOffset = Math.max(10, visibleBars - 3);
     this._rightOffset = Math.max(minRightOffset, Math.min(maxRightOffset, this._rightOffset));
   }
 

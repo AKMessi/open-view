@@ -92,6 +92,21 @@ describe('Phase 1 — Clean-Room Chart Engine Core Invariants', () => {
     ts.zoomAtCoordinate(350, 1.5, 0);
     const afterIdx = ts.coordinateToIndex(350);
     expect(afterIdx).toBeCloseTo(beforeIdx, 8);
+
+    // Direct-manipulation pan polarity:
+    // Dragging mouse LEFT (dx = -100) moves grabbed bar LEFT by 100px (taking viewport RIGHT)
+    const bar450Before = ts.indexToCoordinate(450);
+    ts.scrollByPixels(-100, 0);
+    expect(ts.indexToCoordinate(450)).toBeCloseTo(bar450Before - 100, 8);
+
+    // Dragging mouse RIGHT (dx = +100) returns grabbed bar RIGHT by 100px (revealing older left history)
+    ts.scrollByPixels(100, 0);
+    expect(ts.indexToCoordinate(450)).toBeCloseTo(bar450Before, 8);
+
+    // Full history scrollability: dragging right reaches bar 0 smoothly
+    ts.scrollByPixels(10_000, 0);
+    const vis = ts.getVisibleLogicalRange(0, 500);
+    expect(vis.from).toBe(0);
   });
 
   it('maintains pan-invariant SymlogPriceScale across positive & zero-crossing negative spreads', () => {
