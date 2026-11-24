@@ -1,0 +1,1210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>OpenView Launch Film Renderer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: #04060b;
+    color: #f8fafc;
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: geometricPrecision;
+  }
+
+  #stage {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: radial-gradient(ellipse 110% 80% at 50% 10%, #0d152a 0%, #050811 58%, #030408 100%);
+  }
+
+  /* Technical subtle dot-grid backdrop */
+  #dot-grid {
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, black 20%, transparent 85%);
+    pointer-events: none;
+  }
+
+  /* Dynamic reactive ambient volumetric glow orbs (pure smooth Gaussian radial gradients - 0 blur cost!) */
+  .orb {
+    position: absolute;
+    border-radius: 9999px;
+    pointer-events: none;
+    will-change: transform, opacity;
+  }
+  #orb-blue {
+    width: 1360px; height: 960px;
+    left: -30px; top: -320px;
+    background: radial-gradient(ellipse at center, rgba(41, 98, 255, 0.34) 0%, rgba(41, 98, 255, 0.16) 32%, rgba(41, 98, 255, 0.04) 56%, rgba(41, 98, 255, 0) 74%);
+  }
+  #orb-emerald {
+    width: 1180px; height: 900px;
+    right: -280px; bottom: -280px;
+    background: radial-gradient(ellipse at center, rgba(8, 153, 129, 0.28) 0%, rgba(8, 153, 129, 0.12) 34%, rgba(8, 153, 129, 0.03) 56%, rgba(8, 153, 129, 0) 74%);
+  }
+  #orb-violet {
+    width: 1080px; height: 820px;
+    left: 420px; top: 240px;
+    background: radial-gradient(ellipse at center, rgba(124, 58, 237, 0.22) 0%, rgba(124, 58, 237, 0.09) 34%, rgba(124, 58, 237, 0.02) 56%, rgba(124, 58, 237, 0) 74%);
+  }
+
+  /* Subtle animated background vector chart for Act 1 & Act 6 */
+  #bg-chart-svg {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    pointer-events: none;
+    mask-image: linear-gradient(90deg, transparent 0%, black 10%, black 90%, transparent 100%);
+  }
+
+  /* ── ACT 1A / 1B / 4A / 6 FULL-SCREEN TYPOGRAPHY LAYER ── */
+  .scene-layer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .hero-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 22px;
+    border-radius: 999px;
+    background: rgba(41, 98, 255, 0.14);
+    border: 1px solid rgba(91, 156, 246, 0.35);
+    color: #93c5fd;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-bottom: 32px;
+  }
+
+  .mega-title {
+    font-size: 104px;
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    line-height: 1.04;
+    text-align: center;
+    color: #ffffff;
+  }
+
+  .price-strike-wrap {
+    position: relative;
+    display: inline-block;
+    color: #94a3b8;
+  }
+
+  #price-slash {
+    position: absolute;
+    left: -10px;
+    right: -10px;
+    top: 56%;
+    height: 9px;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #f23645, #ff6b6b);
+    box-shadow: 0 0 28px rgba(242, 54, 69, 0.9);
+    transform-origin: left center;
+    transform: rotate(-4deg) scaleX(0);
+  }
+
+  .emerald-gradient {
+    background: linear-gradient(135deg, #34d399 0%, #089981 55%, #10b981 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 36px rgba(16, 185, 129, 0.45));
+  }
+
+  .blue-gradient {
+    background: linear-gradient(135deg, #ffffff 10%, #93c5fd 60%, #2962ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 42px rgba(41, 98, 255, 0.55));
+  }
+
+  .pill-row {
+    display: flex;
+    gap: 18px;
+    margin-top: 44px;
+  }
+
+  .hook-pill {
+    padding: 14px 28px;
+    border-radius: 14px;
+    background: rgba(15, 23, 42, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #e2e8f0;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  }
+
+  /* ── STUDIO FLOATING 3D DEMO WINDOW STAGE ── */
+  #window-stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    perspective: 1800px;
+    opacity: 0;
+  }
+
+  #window-bezel {
+    position: relative;
+    width: 1740px;
+    border-radius: 18px;
+    background: #0d111a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow:
+      0 42px 110px rgba(0, 0, 0, 0.82),
+      0 0 0 1px rgba(41, 98, 255, 0.22),
+      0 0 90px rgba(41, 98, 255, 0.16);
+    overflow: hidden;
+    transform-style: preserve-3d;
+    will-change: transform, opacity;
+  }
+
+  #window-titlebar {
+    height: 40px;
+    background: linear-gradient(180deg, #161b26 0%, #10141e 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+  }
+
+  .traffic-dots {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .tdot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .tdot.red { background: #ff5f57; }
+  .tdot.yel { background: #febc2e; }
+  .tdot.grn { background: #28c840; }
+
+  .win-url {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 18px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 13.5px;
+    color: #94a3b8;
+  }
+  .win-url strong { color: #e2e8f0; font-weight: 600; }
+
+  .win-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12.5px;
+    color: #34d399;
+    font-weight: 600;
+  }
+  .live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    box-shadow: 0 0 12px #10b981;
+  }
+
+  #demo-viewport {
+    position: relative;
+    width: 1740px;
+    height: 832px;
+    overflow: hidden;
+    background: #ffffff;
+  }
+
+  #demoCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1740px;
+    height: 832px;
+    transform-origin: 50% 50%;
+    will-change: transform;
+  }
+
+  /* ── FLOATING KINETIC FEATURE CALLOUT HUD ── */
+  #hud-callout {
+    position: absolute;
+    left: 72px;
+    bottom: 52px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 18px 28px;
+    border-radius: 18px;
+    background: linear-gradient(145deg, rgba(13, 19, 34, 0.94), rgba(7, 10, 18, 0.96));
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.68), 0 0 32px rgba(41, 98, 255, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    opacity: 0;
+  }
+
+  #hud-accent {
+    width: 6px;
+    height: 54px;
+    border-radius: 4px;
+    background: linear-gradient(180deg, #2962ff, #089981);
+  }
+
+  #hud-badge {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #60a5fa;
+    margin-bottom: 4px;
+  }
+
+  #hud-title {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: #ffffff;
+    line-height: 1.1;
+  }
+
+  #hud-sub {
+    font-size: 17px;
+    color: #94a3b8;
+    margin-top: 4px;
+  }
+
+  /* Market Switcher Ribbon (Act 3A) */
+  #market-ribbon {
+    position: absolute;
+    right: 72px;
+    bottom: 56px;
+    display: flex;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 16px;
+    background: rgba(8, 12, 22, 0.90);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+    opacity: 0;
+  }
+  .mpill {
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 16px;
+    font-weight: 700;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid transparent;
+  }
+  .mpill.active {
+    color: #ffffff;
+    background: rgba(41, 98, 255, 0.26);
+    border-color: rgba(96, 165, 250, 0.55);
+    box-shadow: 0 0 22px rgba(41, 98, 255, 0.45);
+  }
+
+  /* Live Unlimited Indicator Counter HUD (Act 4B) */
+  #ind-counter {
+    position: absolute;
+    right: 84px;
+    top: 78px;
+    padding: 20px 30px;
+    border-radius: 20px;
+    background: rgba(8, 12, 22, 0.92);
+    border: 1px solid rgba(16, 185, 129, 0.50);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.72), 0 0 42px rgba(16, 185, 129, 0.28);
+    text-align: right;
+    opacity: 0;
+  }
+  #ind-counter-label {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 14px;
+    letter-spacing: 0.14em;
+    color: #34d399;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  #ind-counter-num {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 64px;
+    font-weight: 800;
+    line-height: 1.05;
+    color: #ffffff;
+  }
+  #ind-counter-sub {
+    font-size: 15px;
+    color: #94a3b8;
+    margin-top: 2px;
+  }
+
+  /* Ctrl+K Keycap Floating Pill (Act 3B) */
+  #ctrlk-badge {
+    position: absolute;
+    right: 88px;
+    top: 84px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 24px;
+    border-radius: 16px;
+    background: rgba(8, 12, 22, 0.92);
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    box-shadow: 0 22px 54px rgba(0, 0, 0, 0.72);
+    opacity: 0;
+  }
+  .keycap {
+    padding: 8px 16px;
+    border-radius: 10px;
+    background: linear-gradient(180deg, #1e293b, #0f172a);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    box-shadow: 0 4px 0 #020617;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 24px;
+    font-weight: 800;
+    color: #ffffff;
+  }
+
+  /* ── ACT 5B: 6-CARD APPLE BENTO FEATURE GRID ── */
+  #bento-scene {
+    padding: 84px 110px;
+    justify-content: center;
+  }
+  .bento-header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  .bento-title {
+    font-size: 68px;
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    color: #ffffff;
+  }
+  .bento-sub {
+    font-size: 24px;
+    color: #94a3b8;
+    margin-top: 10px;
+  }
+  .bento-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    width: 100%;
+    max-width: 1680px;
+  }
+  .bento-card {
+    position: relative;
+    padding: 34px 34px 36px;
+    border-radius: 22px;
+    background: linear-gradient(155deg, rgba(22, 30, 48, 0.88), rgba(11, 15, 25, 0.94));
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    box-shadow: 0 26px 60px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+  }
+  .bento-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent, #2962ff), transparent);
+  }
+  .bento-tag {
+    display: inline-block;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--accent, #60a5fa);
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 18px;
+  }
+  .bento-card h3 {
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    color: #ffffff;
+    margin-bottom: 10px;
+  }
+  .bento-card p {
+    font-size: 19px;
+    line-height: 1.45;
+    color: #94a3b8;
+  }
+
+  /* ── ACT 6: GRAND FINALE GITHUB CTA ── */
+  .brand-emblem {
+    width: 112px;
+    height: 112px;
+    border-radius: 28px;
+    background: linear-gradient(145deg, #1d4ed8, #2962ff 55%, #089981);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 24px 70px rgba(41, 98, 255, 0.55), inset 0 1px 1px rgba(255,255,255,0.45);
+    margin-bottom: 30px;
+  }
+  .terminal-cmd {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 42px;
+    padding: 20px 34px;
+    border-radius: 16px;
+    background: rgba(10, 14, 24, 0.92);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 24px;
+    color: #e2e8f0;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+  }
+  .terminal-cmd .prompt { color: #34d399; font-weight: 800; }
+  .terminal-cursor {
+    display: inline-block;
+    width: 12px;
+    height: 26px;
+    background: #60a5fa;
+    vertical-align: middle;
+  }
+  .github-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 34px;
+    padding: 18px 38px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #2962ff 0%, #1d4ed8 100%);
+    border: 1px solid rgba(147, 197, 253, 0.55);
+    box-shadow: 0 18px 56px rgba(41, 98, 255, 0.55);
+    font-size: 26px;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.01em;
+  }
+
+  /* Subtle cinematic vignette + flash transition overlay */
+  #vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 85% 85% at 50% 50%, transparent 58%, rgba(2, 4, 9, 0.62) 100%);
+    pointer-events: none;
+  }
+  #flash-overlay {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, rgba(147, 197, 253, 0.95), rgba(41, 98, 255, 0.45) 55%, transparent 90%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  #fade-black {
+    position: absolute;
+    inset: 0;
+    background: #020307;
+    opacity: 0;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="dot-grid"></div>
+  <div id="orb-blue" class="orb"></div>
+  <div id="orb-emerald" class="orb"></div>
+  <div id="orb-violet" class="orb"></div>
+
+  <!-- Animated background vector candlestick horizon -->
+  <svg id="bg-chart-svg" viewBox="0 0 1920 1080" fill="none">
+    <defs>
+      <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#2962ff" stop-opacity="0.28" />
+        <stop offset="100%" stop-color="#2962ff" stop-opacity="0.0" />
+      </linearGradient>
+    </defs>
+    <path id="bg-area" d="" fill="url(#areaGrad)" />
+    <path id="bg-line" d="" stroke="#3b82f6" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" />
+    <g id="bg-candles" opacity="0.34"></g>
+  </svg>
+
+  <!-- ACT 1A: THE HOOK (0.00s - 3.87s) -->
+  <div id="act-hook" class="scene-layer">
+    <div class="hero-kicker" id="hook-kicker">
+      <span class="live-dot"></span> OPEN-SOURCE MARKET WORKBENCH
+    </div>
+    <div class="mega-title" id="hook-line1">
+      Pro charting shouldn't cost<br />
+      <span class="price-strike-wrap">$60/mo.<span id="price-slash"></span></span>
+      <span id="hook-free" class="emerald-gradient" style="display:inline-block;margin-left:22px;opacity:0;">$0. Forever.</span>
+    </div>
+    <div class="pill-row" id="hook-pills">
+      <div class="hook-pill" id="hp-1">Zero Paywalls</div>
+      <div class="hook-pill" id="hp-2">Unlimited Indicators</div>
+      <div class="hook-pill" id="hp-3">100% MIT Open Source</div>
+    </div>
+  </div>
+
+  <!-- ACT 1B: BRAND LOGO SLAM (3.87s - 5.81s) -->
+  <div id="act-logo" class="scene-layer">
+    <div class="brand-emblem" id="logo-emblem">
+      <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+        <rect x="11" y="28" width="8" height="22" rx="3" fill="#ffffff" opacity="0.92"/>
+        <line x1="15" y1="18" x2="15" y2="56" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+        <rect x="28" y="16" width="8" height="26" rx="3" fill="#6ee7b7"/>
+        <line x1="32" y1="8" x2="32" y2="50" stroke="#6ee7b7" stroke-width="3" stroke-linecap="round"/>
+        <rect x="45" y="12" width="8" height="32" rx="3" fill="#ffffff"/>
+        <line x1="49" y1="6" x2="49" y2="54" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="mega-title blue-gradient" id="logo-word" style="font-size:138px;">OpenView</div>
+    <div id="logo-sub" style="font-size:34px;color:#cbd5e1;font-weight:500;margin-top:16px;letter-spacing:-0.015em;">
+      The Open-Source TradingView Alternative
+    </div>
+    <div id="logo-repo" style="margin-top:26px;font-family:'Cascadia Code','Consolas',monospace;font-size:20px;color:#60a5fa;padding:10px 24px;border-radius:999px;background:rgba(41,98,255,0.14);border:1px solid rgba(96,165,250,0.35);">
+      github.com/AKMessi/oss-trading-view
+    </div>
+  </div>
+
+  <!-- STUDIO 3D FLOATING DEMO WINDOW (Acts 2, 3, 4B, 4C, 5A) -->
+  <div id="window-stage">
+    <div id="window-bezel">
+      <div id="window-titlebar">
+        <div class="traffic-dots">
+          <div class="tdot red"></div>
+          <div class="tdot yel"></div>
+          <div class="tdot grn"></div>
+        </div>
+        <div class="win-url">
+          <span>🔒</span> <strong>openview.local</strong> <span>· MIT Open Source · Rust/WASM Engine</span>
+        </div>
+        <div class="win-status">
+          <span class="live-dot"></span> LIVE 4-MARKET FEED
+        </div>
+      </div>
+      <div id="demo-viewport">
+        <canvas id="demoCanvas" width="1920" height="918"></canvas>
+      </div>
+    </div>
+
+    <!-- Floating Callout HUD -->
+    <div id="hud-callout">
+      <div id="hud-accent"></div>
+      <div>
+        <div id="hud-badge">120 FPS CANVAS 2D CORE</div>
+        <div id="hud-title">Clean-Room Chart Engine</div>
+        <div id="hud-sub">250,000 bars pan &amp; zoom in &lt; 2.5ms · Zero proprietary code</div>
+      </div>
+    </div>
+
+    <!-- Market Switcher Ribbon (Act 3A) -->
+    <div id="market-ribbon">
+      <div class="mpill" id="mp-crypto">CRYPTO</div>
+      <div class="mpill" id="mp-us">US EQUITIES</div>
+      <div class="mpill" id="mp-fx">FOREX &amp; GOLD</div>
+      <div class="mpill" id="mp-nse">INDIA NSE / MCX</div>
+    </div>
+
+    <!-- Ctrl+K Keycap Pill (Act 3B) -->
+    <div id="ctrlk-badge">
+      <span class="keycap">Ctrl</span>
+      <span style="font-size:24px;color:#64748b;font-weight:700;">+</span>
+      <span class="keycap">K</span>
+      <div style="margin-left:8px;">
+        <div style="font-size:18px;font-weight:800;color:#fff;">4,200+ Exchange Masters</div>
+        <div style="font-size:14px;color:#94a3b8;">+ 100k Global Autocomplete</div>
+      </div>
+    </div>
+
+    <!-- Live Unlimited Indicator Counter (Act 4B) -->
+    <div id="ind-counter">
+      <div id="ind-counter-label">ACTIVE RUST / WASM STUDIES</div>
+      <div id="ind-counter-num">2</div>
+      <div id="ind-counter-sub">Zero paywall · Zero limit</div>
+    </div>
+  </div>
+
+  <!-- ACT 4A: PAYWALL SMASHER INTERSTITIAL (19.35s - 21.29s) -->
+  <div id="act-paywall" class="scene-layer">
+    <div class="hero-kicker" style="background:rgba(242,54,69,0.14);border-color:rgba(242,54,69,0.45);color:#fca5a5;">
+      NO $60/MO PREMIUM TIER NEEDED
+    </div>
+    <div class="mega-title" id="pw-line1" style="font-size:94px;">
+      Why stop at <span style="color:#f23645;">2 indicators</span>?
+    </div>
+    <div class="mega-title emerald-gradient" id="pw-line2" style="font-size:112px;margin-top:16px;opacity:0;">
+      Stack Unlimited.
+    </div>
+    <div id="pw-sub" style="margin-top:24px;font-family:'Cascadia Code','Consolas',monospace;font-size:24px;color:#93c5fd;opacity:0;">
+      Native Rust → WebAssembly TA Engine · 18+ TradingView-Parity Studies
+    </div>
+  </div>
+
+  <!-- ACT 5B: 6-CARD BENTO FEATURE SHOWCASE (32.90s - 36.77s) -->
+  <div id="bento-scene" class="scene-layer">
+    <div class="bento-header" id="bento-head">
+      <div class="bento-title">Everything a Pro Desk Demands.</div>
+      <div class="bento-sub">100% Free · Local-First · Self-Hostable in One Command</div>
+    </div>
+    <div class="bento-grid">
+      <div class="bento-card" id="bc-0" style="--accent:#2962ff;">
+        <div class="bento-tag">RUST / WASM VM</div>
+        <h3>Pine v5/v6 + TS Editor</h3>
+        <p>Static repainting linter, var/varip rollback arena &amp; zero-copy TA execution.</p>
+      </div>
+      <div class="bento-card" id="bc-1" style="--accent:#10b981;">
+        <div class="bento-tag">VECTOR ENGINE</div>
+        <h3>53 Drawings &amp; Multi-Chart</h3>
+        <p>OHLC magnet, Anchored VWAP, Pitchforks, Gann, Harmonics &amp; 4×2 synced grid.</p>
+      </div>
+      <div class="bento-card" id="bc-2" style="--accent:#f59e0b;">
+        <div class="bento-tag">MICROSTRUCTURE</div>
+        <h3>Orderflow &amp; Non-Time</h3>
+        <p>Footprint, VRVP, TPO Market Profile, L2 DOM Ladder, Renko, Kagi &amp; Spreads.</p>
+      </div>
+      <div class="bento-card" id="bc-3" style="--accent:#a855f7;">
+        <div class="bento-tag">EXECUTION &amp; SIM</div>
+        <h3>Paper Trading &amp; Backtester</h3>
+        <p>Gap-open fill realism, OCO brackets, Multi-TF Bar Replay &amp; NSE/US/FX/Crypto fees.</p>
+      </div>
+      <div class="bento-card" id="bc-4" style="--accent:#06b6d4;">
+        <div class="bento-tag">DERIVATIVES</div>
+        <h3>Black-Scholes Option Chain</h3>
+        <p>Live Delta, Gamma, Theta, Vega &amp; IV ladder across Indian NSE &amp; US options.</p>
+      </div>
+      <div class="bento-card" id="bc-5" style="--accent:#f43f5e;">
+        <div class="bento-tag">24/7 BRIDGE + SECURITY</div>
+        <h3>Alerts, Screener &amp; Vault</h3>
+        <p>SSRF-guarded HMAC webhooks, WASM scanner, DPAPI vault &amp; SEBI Apr 2026 airlock.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACT 6: GRAND FINALE GITHUB CTA (36.77s - 42.58s) -->
+  <div id="act-cta" class="scene-layer">
+    <div class="brand-emblem" id="cta-emblem">
+      <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+        <rect x="11" y="28" width="8" height="22" rx="3" fill="#ffffff" opacity="0.92"/>
+        <line x1="15" y1="18" x2="15" y2="56" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+        <rect x="28" y="16" width="8" height="26" rx="3" fill="#6ee7b7"/>
+        <line x1="32" y1="8" x2="32" y2="50" stroke="#6ee7b7" stroke-width="3" stroke-linecap="round"/>
+        <rect x="45" y="12" width="8" height="32" rx="3" fill="#ffffff"/>
+        <line x1="49" y1="6" x2="49" y2="54" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="mega-title blue-gradient" id="cta-title" style="font-size:126px;">OpenView</div>
+    <div id="cta-sub" style="font-size:34px;color:#cbd5e1;font-weight:600;margin-top:12px;">
+      Free. Local-First. MIT Open Source.
+    </div>
+    <div class="terminal-cmd" id="cta-term">
+      <span class="prompt">$</span>
+      <span id="cta-typed"></span><span class="terminal-cursor" id="cta-cursor"></span>
+    </div>
+    <div class="github-cta" id="cta-btn">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 0.5C5.37 0.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.49 1 .11-.78.42-1.31.76-1.61-2.66-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58C20.57 22.3 24 17.8 24 12.5 24 5.87 18.63 0.5 12 0.5Z"/>
+      </svg>
+      <span>★ Star on GitHub · AKMessi/oss-trading-view</span>
+    </div>
+  </div>
+
+  <div id="vignette"></div>
+  <div id="flash-overlay"></div>
+  <div id="fade-black"></div>
+</div>
+
+<script>
+  const BPM = 124.0;
+  const BEAT = 60.0 / BPM;
+  const BAR = BEAT * 4.0;
+  const TOTAL_DUR = BAR * 22;
+
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const easeOutCubic = (t) => 1 - Math.pow(1 - clamp01(t), 3);
+  const easeOutExpo = (t) => (t >= 1 ? 1 : 1 - Math.pow(2, -10 * clamp01(t)));
+  const easeInOutCubic = (t) => {
+    const x = clamp01(t);
+    return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+  };
+  const springOut = (t) => {
+    const x = clamp01(t);
+    return 1 - Math.exp(-7.5 * x) * Math.cos(11.5 * x);
+  };
+
+  // Pre-build deterministic decorative background candlesticks for Act 1 & Act 6
+  const bgPoints = [];
+  let price = 640;
+  for (let i = 0; i <= 48; i++) {
+    const x = i * 40;
+    const step = Math.sin(i * 0.42) * 34 + Math.cos(i * 0.17) * 24 - 4.2;
+    const open = price;
+    const close = Math.max(220, Math.min(860, open + step));
+    const high = Math.min(open, close) - (12 + (i * 19) % 36);
+    const low = Math.max(open, close) + (12 + (i * 13) % 32);
+    bgPoints.push({ x, open, close, high, low });
+    price = close;
+  }
+
+  const demoCanvas = document.getElementById('demoCanvas');
+  const demoCtx = demoCanvas.getContext('2d');
+  const $ = (id) => document.getElementById(id);
+
+  // Pre-build SVG candlestick elements once (zero per-frame innerHTML reparsing!)
+  const bgCandleEls = [];
+  {
+    let initHtml = '';
+    for (let i = 0; i < bgPoints.length; i++) {
+      const p = bgPoints[i];
+      const bull = p.close <= p.open;
+      const col = bull ? '#10b981' : '#f43f5e';
+      const top = Math.min(p.open, p.close);
+      const h = Math.max(6, Math.abs(p.close - p.open));
+      initHtml += `<g id="bgc-${i}" style="display:none">` +
+        `<line x1="${p.x}" y1="${p.high.toFixed(1)}" x2="${p.x}" y2="${p.low.toFixed(1)}" stroke="${col}" stroke-width="2"/>` +
+        `<rect x="${p.x - 8}" y="${top.toFixed(1)}" width="16" height="${h.toFixed(1)}" rx="2" fill="${col}"/>` +
+        `</g>`;
+    }
+    $('bg-candles').innerHTML = initHtml;
+    for (let i = 0; i < bgPoints.length; i++) bgCandleEls.push($(`bgc-${i}`));
+  }
+
+  let lastVisCount = -1;
+  let lastDemoImgUrl = null;
+
+  function renderBgChart(progress, opacity) {
+    const svg = $('bg-chart-svg');
+    svg.style.opacity = opacity.toFixed(3);
+    if (opacity <= 0.005) return;
+    const visCount = Math.max(2, Math.floor(progress * bgPoints.length));
+    if (visCount === lastVisCount) return;
+    lastVisCount = visCount;
+    let lineD = '';
+    for (let i = 0; i < visCount; i++) {
+      const p = bgPoints[i];
+      lineD += (i === 0 ? 'M' : 'L') + `${p.x},${p.close.toFixed(1)} `;
+    }
+    const last = bgPoints[visCount - 1];
+    $('bg-line').setAttribute('d', lineD);
+    $('bg-area').setAttribute('d', `${lineD} L${last.x},1080 L0,1080 Z`);
+
+    for (let i = 0; i < bgPoints.length; i++) {
+      bgCandleEls[i].style.display = i < visCount ? '' : 'none';
+    }
+  }
+
+  function setHud(visible, badge, title, sub, accentGrad, slideT = 1) {
+    const el = $('hud-callout');
+    if (!visible) {
+      el.style.opacity = '0';
+      return;
+    }
+    const p = easeOutExpo(slideT);
+    el.style.opacity = p.toFixed(3);
+    el.style.transform = `translate3d(${lerp(-40, 0, p).toFixed(1)}px, ${lerp(24, 0, p).toFixed(1)}px, 0)`;
+    $('hud-badge').textContent = badge;
+    $('hud-title').textContent = title;
+    $('hud-sub').textContent = sub;
+    $('hud-accent').style.background = accentGrad;
+  }
+
+  function setDemoCamera(scale, originX, originY) {
+    demoCanvas.style.transformOrigin = `${originX}% ${originY}%`;
+    demoCanvas.style.transform = `scale(${scale.toFixed(4)})`;
+  }
+
+  window.renderLaunchFrame = async function(frameIdx, totalFrames, fps, demoImgUrl) {
+    const t = frameIdx / fps;
+    const beatPulse = Math.pow(1 - ((t % BEAT) / BEAT), 2.5);
+
+    // Subtle living studio ambient orbs
+    $('orb-blue').style.transform = `translate3d(${Math.sin(t * 0.45) * 65}px, ${Math.cos(t * 0.35) * 35}px, 0) scale(${(1 + beatPulse * 0.06).toFixed(3)})`;
+    $('orb-emerald').style.transform = `translate3d(${Math.cos(t * 0.4) * 55}px, ${Math.sin(t * 0.5) * 40}px, 0) scale(${(1 + beatPulse * 0.05).toFixed(3)})`;
+    $('orb-violet').style.transform = `translate3d(${Math.sin(t * 0.3) * 45}px, ${Math.cos(t * 0.4) * 30}px, 0)`;
+
+    // Reset all major layers
+    $('act-hook').style.opacity = '0';
+    $('act-logo').style.opacity = '0';
+    $('window-stage').style.opacity = '0';
+    $('act-paywall').style.opacity = '0';
+    $('bento-scene').style.opacity = '0';
+    $('act-cta').style.opacity = '0';
+    $('market-ribbon').style.opacity = '0';
+    $('ctrlk-badge').style.opacity = '0';
+    $('ind-counter').style.opacity = '0';
+    setHud(false, '', '', '', '');
+
+    // Flash transitions right on major drops (Bars 2, 10, 13, 19)
+    let flash = 0;
+    for (const dropT of [2 * BAR, 10 * BAR, 13 * BAR, 19 * BAR]) {
+      const dt = t - dropT;
+      if (dt >= 0 && dt < 0.28) {
+        flash = Math.max(flash, Math.pow(1 - dt / 0.28, 2.2) * 0.55);
+      }
+    }
+    $('flash-overlay').style.opacity = flash.toFixed(3);
+
+    // Fade-out on very last 1.0s
+    const fadeOut = t > TOTAL_DUR - 1.0 ? clamp01((t - (TOTAL_DUR - 1.0)) / 1.0) : 0;
+    $('fade-black').style.opacity = fadeOut.toFixed(3);
+
+    // Draw exact frame-accurate cropped demo frame if this timestamp uses live demo footage
+    if (demoImgUrl && demoImgUrl !== lastDemoImgUrl) {
+      const img = new Image();
+      img.src = demoImgUrl;
+      await img.decode();
+      demoCtx.drawImage(img, 0, 0, 1920, 918);
+      lastDemoImgUrl = demoImgUrl;
+    }
+
+    // ── ACT 1A: THE HOOK (0.00s - 3.87s) ────────────────────────────────
+    if (t < 2 * BAR) {
+      // Full-width chart with smooth alpha rise (eliminates any harsh vertical right-edge clip)
+      renderBgChart(1.0, easeOutCubic(t / 1.1) * 0.68);
+      const layer = $('act-hook');
+      const exitFade = t > 2 * BAR - 0.22 ? 1 - (t - (2 * BAR - 0.22)) / 0.22 : 1;
+      layer.style.opacity = clamp01(exitFade).toFixed(3);
+
+      const p1 = easeOutExpo(t / 0.65);
+      $('hook-kicker').style.opacity = p1.toFixed(3);
+      $('hook-kicker').style.transform = `translateY(${lerp(24, 0, p1).toFixed(1)}px)`;
+      $('hook-line1').style.opacity = easeOutExpo(t / 0.55).toFixed(3);
+      $('hook-line1').style.transform = `translateY(${lerp(36, 0, p1).toFixed(1)}px)`;
+
+      // Slash $60/mo cleanly through the center right before Bar 1 -> reveal "$0. Forever." at 1.935s!
+      const slashP = easeOutExpo((t - 1.55) / 0.30);
+      $('price-slash').style.transform = `rotate(-4deg) scaleX(${slashP.toFixed(3)})`;
+
+      const freeP = springOut((t - BAR) / 0.55);
+      const freeEl = $('hook-free');
+      freeEl.style.opacity = clamp01((t - BAR) / 0.14).toFixed(3);
+      freeEl.style.transform = `scale(${lerp(1.35, 1.0, freeP).toFixed(3)})`;
+
+      // Staggered hook pills on Beats 5, 6, 7
+      const pillStarts = [BAR + 0.32, BAR + 0.62, BAR + 0.92];
+      pillStarts.forEach((st, idx) => {
+        const el = $(`hp-${idx + 1}`);
+        const pp = easeOutExpo((t - st) / 0.32);
+        el.style.opacity = pp.toFixed(3);
+        el.style.transform = `translateY(${lerp(26, 0, pp).toFixed(1)}px)`;
+      });
+      return;
+    }
+
+    // ── ACT 1B: BRAND LOGO SLAM (3.87s - 5.81s) ─────────────────────────
+    if (t < 3 * BAR) {
+      const local = t - 2 * BAR;
+      renderBgChart(1.0, 0.55);
+      const layer = $('act-logo');
+      const exitP = local > BAR - 0.24 ? (local - (BAR - 0.24)) / 0.24 : 0;
+      layer.style.opacity = clamp01(1 - exitP).toFixed(3);
+      layer.style.transform = `scale(${lerp(1.0, 1.12, exitP).toFixed(3)})`;
+
+      const sp = springOut(local / 0.55);
+      $('logo-emblem').style.transform = `scale(${lerp(0.45, 1.0, sp).toFixed(3)})`;
+      $('logo-word').style.transform = `scale(${lerp(1.22, 1.0, sp).toFixed(3)})`;
+      const subP = easeOutExpo((local - 0.16) / 0.42);
+      $('logo-sub').style.opacity = subP.toFixed(3);
+      $('logo-sub').style.transform = `translateY(${lerp(22, 0, subP).toFixed(1)}px)`;
+      const repoP = easeOutExpo((local - 0.34) / 0.42);
+      $('logo-repo').style.opacity = repoP.toFixed(3);
+      return;
+    }
+
+    // Hide background chart during demo window scenes
+    renderBgChart(1.0, 0);
+
+    // ── ACT 2: HERO 3D CANVAS ENGINE (5.81s - 11.61s) ───────────────────
+    if (t < 6 * BAR) {
+      const local = t - 3 * BAR;
+      const dur = 3 * BAR;
+      const enter = easeOutExpo(local / 0.78);
+      $('window-stage').style.opacity = clamp01(enter).toFixed(3);
+
+      const rotX = lerp(12, 0, enter);
+      const rotY = lerp(-7, 0.8 * Math.sin(local * 0.6), enter);
+      const sc = lerp(0.84, 0.99, enter);
+      const ty = lerp(70, -10, enter);
+      $('window-bezel').style.transform = `translate3d(0, ${ty.toFixed(1)}px, 0) rotateX(${rotX.toFixed(2)}deg) rotateY(${rotY.toFixed(2)}deg) scale(${sc.toFixed(4)})`;
+
+      // Smooth subtle push-in keeping full top OpenView toolbar unclipped & crisp
+      const camZoom = lerp(1.0, 1.05, easeInOutCubic(local / dur));
+      setDemoCamera(camZoom, 50, 18);
+
+      setHud(
+        true,
+        '120 FPS CANVAS 2D CORE',
+        'Clean-Room Chart Engine',
+        '250,000 bars pan & zoom in < 2.5ms · Zero proprietary code',
+        'linear-gradient(180deg, #2962ff, #60a5fa)',
+        (local - 0.25) / 0.55,
+      );
+      return;
+    }
+
+    // ── ACT 3A: ALL 4 GLOBAL MARKETS (11.61s - 15.48s) ──────────────────
+    if (t < 8 * BAR) {
+      const local = t - 6 * BAR;
+      const dur = 2 * BAR;
+      $('window-stage').style.opacity = '1';
+      $('window-bezel').style.transform = `translate3d(0, -10px, 0) rotateX(1.5deg) rotateY(-2.5deg) scale(0.99)`;
+
+      // Frame full chart + right-side Watchlist cleanly without clipping top bar
+      const camZ = lerp(1.04, 1.14, easeOutCubic(local / 0.7));
+      setDemoCamera(camZ, 82, 24);
+
+      // Market ribbon lights up Crypto -> US Equities in sync with exact ETH/SOL -> AAPL/NVDA cut!
+      const rib = $('market-ribbon');
+      rib.style.opacity = easeOutExpo(local / 0.35).toFixed(3);
+      const activeIdx = local < BAR ? 0 : 1;
+      ['mp-crypto', 'mp-us', 'mp-fx', 'mp-nse'].forEach((id, i) => {
+        $(id).className = i === activeIdx ? 'mpill active' : 'mpill';
+      });
+
+      setHud(
+        true,
+        '4 GLOBAL MARKETS · 1 WORKBENCH',
+        'Real-Time Live Multi-Asset Feeds',
+        'Crypto · US Equities · Forex & Gold · Indian NSE & MCX',
+        'linear-gradient(180deg, #10b981, #2962ff)',
+        local / 0.45,
+      );
+      return;
+    }
+
+    // ── ACT 3B: CTRL+K UNIVERSAL GLOBAL SEARCH (15.48s - 17.42s) ────────
+    if (t < 9 * BAR) {
+      const local = t - 8 * BAR;
+      $('window-stage').style.opacity = '1';
+      $('window-bezel').style.transform = `translate3d(0, -8px, 0) rotateX(0deg) rotateY(0deg) scale(1.0)`;
+
+      // Anchored macro zoom (originY=14%) so the ENTIRE dark glass Ctrl+K modal is framed dead-center with zero clipping!
+      const camZ = lerp(1.24, 1.38, easeOutCubic(local / BAR));
+      setDemoCamera(camZ, 50, 14);
+
+      const ck = $('ctrlk-badge');
+      const ckp = springOut(local / 0.42);
+      ck.style.opacity = clamp01(local / 0.16).toFixed(3);
+      ck.style.transform = `translateY(${lerp(-24, 0, ckp).toFixed(1)}px) scale(${lerp(0.9, 1, ckp).toFixed(3)})`;
+
+      setHud(
+        true,
+        'UNIVERSAL SYMBOL DIRECTORY',
+        'Search Every Market Instantly',
+        'Binance Spot · Hyperliquid Perps · 2,600+ NSE · Global Stocks',
+        'linear-gradient(180deg, #60a5fa, #a855f7)',
+        local / 0.35,
+      );
+      return;
+    }
+
+    // ── ACT 3C: NATIVE INDIAN NSE RELIANCE (17.42s - 19.35s) ────────────
+    if (t < 10 * BAR) {
+      const local = t - 9 * BAR;
+      $('window-stage').style.opacity = '1';
+      $('window-bezel').style.transform = `translate3d(0, -10px, 0) rotateX(1deg) rotateY(1.8deg) scale(0.99)`;
+      setDemoCamera(lerp(1.06, 1.0, easeOutCubic(local / BAR)), 44, 22);
+
+      const rib = $('market-ribbon');
+      rib.style.opacity = '1';
+      ['mp-crypto', 'mp-us', 'mp-fx', 'mp-nse'].forEach((id, i) => {
+        $(id).className = i === 3 ? 'mpill active' : 'mpill';
+      });
+
+      setHud(
+        true,
+        'INDIA NSE / BSE / MCX NATIVE',
+        '09:15 IST Session-Anchored Candles',
+        'Dynamic NSE ticks · Upstox v3 · Fyers v3 · DhanHQ · Kite',
+        'linear-gradient(180deg, #f59e0b, #10b981)',
+        local / 0.35,
+      );
+      return;
+    }
+
+    // ── ACT 4A: THE PAYWALL SMASHER INTERSTITIAL (19.35s - 21.29s) ──────
+    if (t < 11 * BAR) {
+      const local = t - 10 * BAR;
+      const layer = $('act-paywall');
+      const exitFade = local > BAR - 0.18 ? 1 - (local - (BAR - 0.18)) / 0.18 : 1;
+      layer.style.opacity = clamp01(exitFade).toFixed(3);
+
+      const p1 = easeOutExpo(local / 0.38);
+      $('pw-line1').style.transform = `translateY(${lerp(28, 0, p1).toFixed(1)}px)`;
+
+      // Beat 2.5 slam: "Stack Unlimited."
+      const p2 = springOut((local - 0.68) / 0.45);
+      $('pw-line2').style.opacity = clamp01((local - 0.68) / 0.12).toFixed(3);
+      $('pw-line2').style.transform = `scale(${lerp(1.32, 1.0, p2).toFixed(3)})`;
+      $('pw-sub').style.opacity = easeOutExpo((local - 0.92) / 0.35).toFixed(3);
+      return;
+    }
+
+    // ── ACT 4B: UNLIMITED RUST/WASM STACKING MONTAGE (21.29s - 25.16s) ──
+    if (t < 13 * BAR) {
+      const local = t - 11 * BAR;
+      const dur = 2 * BAR;
+      $('window-stage').style.opacity = '1';
+      $('window-bezel').style.transform = `translate3d(0, -8px, 0) scale(1.0)`;
+
+      // Clean zoom framing the ENTIRE Indicators Modal (title + search + +Add/ON rows) with zero clipping!
+      const camZ = lerp(1.12, 1.22, easeInOutCubic(local / dur));
+      setDemoCamera(camZ, 50, 26);
+
+      // Tick up active indicator counter 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> ∞
+      const steps = ['2', '3', '4', '5', '6', '7+', '∞'];
+      const stepIdx = Math.min(steps.length - 1, Math.floor((local / dur) * steps.length));
+      const cnt = $('ind-counter');
+      cnt.style.opacity = easeOutExpo(local / 0.3).toFixed(3);
+      const localStepProg = ((local / dur) * steps.length) % 1;
+      const pop = 1 + Math.max(0, 1 - localStepProg * 4) * 0.14;
+      $('ind-counter-num').textContent = steps[stepIdx];
+      $('ind-counter-num').style.transform = `scale(${pop.toFixed(3)})`;
+      $('ind-counter-num').style.color = stepIdx >= 5 ? '#34d399' : '#ffffff';
+      $('ind-counter-sub').textContent = 'Zero paywall · Zero limit';
+
+      setHud(
+        true,
+        'RUST → WEBASSEMBLY TA ENGINE',
+        'Unlimited Indicators. Zero Paywall.',
+        'EMA · RSI · MACD · Stochastic · ATR · ADX/DMI · CCI · MFI',
+        'linear-gradient(180deg, #10b981, #34d399)',
+        local / 0.35,
+      );
+      return;
+    }
+
+    // ── ACT 4C: MONEY SHOT — 7+ STACKED SUB-PANES (25.16s - 29.03s) ─────
+    if (t < 15 * BAR) {
+      const local = t - 13 * BAR;
+      const dur = 2 * BAR;
+      $('window-stage').style.opacity = '1';
+
+      // Dramatic pull-back from 1.18x -> 1.0x revealing ALL 7+ simultaneous panes gliding smoothly!
+      const pull = easeOutExpo(local / 1.1);
+      $('window-bezel').style.transform = `translate3d(0, -10px, 0) rotateX(${lerp(5, 0, pull).toFixed(2)}deg) scale(${lerp(1.03, 0.995, pull).toFixed(4)})`;
+      setDemoCamera(lerp(1.16, 1.0, easeOutCubic(local / (dur * 0.7))), 46, 56);
+
+      const cnt = $('ind-counter');
+      cnt.style.opacity = '1';
+      $('ind-counter-num').textContent = '7+';
+      $('ind-counter-num').style.transform = 'scale(1)';
+      $('ind-counter-num').style.color = '#34d399';
+      $('ind-counter-sub').textContent = 'Simultaneous panes · 60 FPS';
+
+      setHud(
+        true,
+        'ZERO LAG · ZERO SUBSCRIPTION',
+        '7+ Stacked Sub-Panes at 60 FPS',
+        'Computed natively inside WebAssembly · Strict 2-canvas tile architecture',
+        'linear-gradient(180deg, #2962ff, #10b981)',
+        local / 0.4,
+      );
+      return;
+    }
+
+    // ── ACT 5A: INSTANT GLOBAL RECOMPUTE BNBUSDT (29.03s - 32.90s) ──────
+    if (t < 17 * BAR) {
+      const local = t - 15 * BAR;
+      const dur = 2 * BAR;
+      const exitP = local > dur - 0.30 ? (local - (dur - 0.30)) / 0.30 : 0;
+      $('window-stage').style.opacity = clamp01(1 - exitP).toFixed(3);
+      $('window-bezel').style.transform = `translate3d(0, ${lerp(-10, -48, exitP).toFixed(1)}px, 0) scale(${lerp(0.995, 0.90, exitP).toFixed(4)})`;
+
+      // Top-anchored zoom on Ctrl+K search (first 1.35s), then crisp wide reveal on BNBUSDT!
+      const isModal = local < 1.35;
+      if (isModal) {
+        setDemoCamera(lerp(1.22, 1.32, easeOutCubic(local / 1.35)), 50, 14);
+      } else {
+        setDemoCamera(lerp(1.08, 1.0, easeOutCubic((local - 1.35) / 0.9)), 50, 48);
+      }
+
+      setHud(
+        true,
+        'INSTANT WASM RECOMPUTE',
+        'Switch Any Symbol. Recompute in < 5ms.',
+        'All overlays & oscillators update live across 100,000+ global symbols',
+        'linear-gradient(180deg, #a855f7, #2962ff)',
+        local / 0.4,
+      );
+      return;
+    }
+
+    // ── ACT 5B: 6-CARD APPLE BENTO FEATURE BLITZ (32.90s - 36.77s) ──────
+    if (t < 19 * BAR) {
+      const local = t - 17 * BAR;
+      const dur = 2 * BAR;
+      const exitP = local > dur - 0.28 ? (local - (dur - 0.28)) / 0.28 : 0;
+      const layer = $('bento-scene');
+      layer.style.opacity = clamp01(1 - exitP).toFixed(3);
+      layer.style.transform = `scale(${lerp(1.0, 0.94, exitP).toFixed(3)})`;
+
+      const hp = easeOutExpo(local / 0.45);
+      $('bento-head').style.opacity = hp.toFixed(3);
+      $('bento-head').style.transform = `translateY(${lerp(24, 0, hp).toFixed(1)}px)`;
+
+      for (let i = 0; i < 6; i++) {
+        const card = $(`bc-${i}`);
+        const cp = springOut((local - 0.14 - i * 0.14) / 0.55);
+        const op = clamp01((local - 0.12 - i * 0.14) / 0.22);
+        card.style.opacity = op.toFixed(3);
+        card.style.transform = `translateY(${lerp(42, 0, cp).toFixed(1)}px) scale(${lerp(0.92, 1.0, cp).toFixed(3)})`;
+      }
+      return;
+    }
+
+    // ── ACT 6: GRAND FINALE GITHUB CTA (36.77s - 42.58s) ────────────────
+    const local = t - 19 * BAR;
+    renderBgChart(1.0, 0.48);
+    const layer = $('act-cta');
+    layer.style.opacity = easeOutExpo(local / 0.45).toFixed(3);
+
+    const sp = springOut(local / 0.65);
+    $('cta-emblem').style.transform = `scale(${lerp(0.6, 1.0, sp).toFixed(3)})`;
+    $('cta-title').style.transform = `scale(${lerp(1.16, 1.0, sp).toFixed(3)})`;
+
+    const subP = easeOutExpo((local - 0.22) / 0.48);
+    $('cta-sub').style.opacity = subP.toFixed(3);
+    $('cta-sub').style.transform = `translateY(${lerp(20, 0, subP).toFixed(1)}px)`;
+
+    // Typing terminal command animation
+    const fullCmd = 'git clone github.com/AKMessi/oss-trading-view && npm run dev';
+    const typeProg = clamp01((local - 0.55) / 2.2);
+    const chars = Math.floor(typeProg * fullCmd.length);
+    $('cta-typed').textContent = fullCmd.slice(0, chars);
+    $('cta-term').style.opacity = easeOutExpo((local - 0.40) / 0.45).toFixed(3);
+    $('cta-cursor').style.opacity = Math.floor(local * 2.5) % 2 === 0 ? '1' : '0.15';
+
+    const btnP = springOut((local - 1.15) / 0.65);
+    $('cta-btn').style.opacity = clamp01((local - 1.15) / 0.25).toFixed(3);
+    $('cta-btn').style.transform = `translateY(${lerp(24, 0, btnP).toFixed(1)}px) scale(${(lerp(0.92, 1.0, btnP) + beatPulse * 0.015).toFixed(3)})`;
+  };
+</script>
+</body>
+</html>

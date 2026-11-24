@@ -26,3 +26,9 @@ playwright-report/
 test-results/
 .DS_Store
 Thumbs.db
+
+# Launch video generated media (reproducible studio scripts in launch-video/ are tracked)
+openview-launch.mp4
+launch-video/soundtrack.wav
+launch-video/qa/
+launch-video/qa_v2/
