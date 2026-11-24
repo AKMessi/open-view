@@ -47,6 +47,7 @@ export interface BaseRenderInput {
   mainPriceScale: SymlogPriceScale;
   calendar: SessionCalendar;
   subPanes: Map<string, { priceScale: SymlogPriceScale; plots: SubPaneSeriesPlot[] }>;
+  onMainPaneBaseOverlay?: (ctx: CanvasRenderingContext2D) => void;
 }
 
 export interface TopRenderInput {
@@ -62,6 +63,7 @@ export interface TopRenderInput {
   subPanes: Map<string, { priceScale: SymlogPriceScale; plots: SubPaneSeriesPlot[] }>;
   crosshair: CrosshairState;
   hoveredDividerIndex: number | null;
+  onMainPaneTopOverlay?: (ctx: CanvasRenderingContext2D) => void;
 }
 
 function clipRectBitmap(
@@ -239,6 +241,11 @@ export function renderBaseLayer(input: BaseRenderInput): { drawnBars: number; mi
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  // Optional committed drawings / chart-trading base overlay clipped strictly to main pane
+  if (input.onMainPaneBaseOverlay) {
+    input.onMainPaneBaseOverlay(ctx);
   }
   ctx.restore(); // End main pane clip
 
@@ -590,6 +597,14 @@ export function renderTopLayer(input: TopRenderInput): void {
         ? plotList.getBar(crosshair.barIndex)
         : plotList.getLastBar();
     renderOnCanvasLegend(ctx, mainPane.rect, symbol, resolution, hoveredBar, mainPriceScale, rx, ry, theme);
+  }
+
+  // Optional draft drawing / anchor handle overlay clipped strictly to main pane
+  if (mainPane && input.onMainPaneTopOverlay) {
+    ctx.save();
+    clipRectBitmap(ctx, mainPane.rect, rx, ry);
+    input.onMainPaneTopOverlay(ctx);
+    ctx.restore();
   }
 
   if (!crosshair.visible) {

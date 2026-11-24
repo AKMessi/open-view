@@ -95,6 +95,13 @@ export class ChartController {
   private crosshairListeners = new Set<(state: CrosshairState) => void>();
   private loadMoreListeners = new Set<(beforeTime: number) => void>();
   private loadMorePending = false;
+  private onBaseOverlay: ((ctx: CanvasRenderingContext2D) => void) | undefined;
+  private onTopOverlay: ((ctx: CanvasRenderingContext2D) => void) | undefined;
+  private pointerInterceptor: {
+    onDown: (x: number, y: number, paneId: string) => boolean;
+    onMove: (x: number, y: number) => boolean;
+    onUp: () => boolean;
+  } | null = null;
 
   constructor(options: ChartControllerOptions) {
     this.symbol = options.symbol;
@@ -190,6 +197,9 @@ export class ChartController {
           this.scheduler.invalidate(DirtyFlag.CURSOR);
         }
       },
+      onInterceptPointerDown: (x, y, paneId) => this.pointerInterceptor?.onDown(x, y, paneId) ?? false,
+      onInterceptPointerMove: (x, y) => this.pointerInterceptor?.onMove(x, y) ?? false,
+      onInterceptPointerUp: () => this.pointerInterceptor?.onUp() ?? false,
     });
 
     this.scheduler.invalidate(DirtyFlag.FULL | DirtyFlag.CURSOR);
@@ -344,6 +354,76 @@ export class ChartController {
     return () => this.loadMoreListeners.delete(fn);
   }
 
+  setOverlayRenderers(
+    onBase: ((ctx: CanvasRenderingContext2D) => void) | undefined,
+    onTop: ((ctx: CanvasRenderingContext2D) => void) | undefined,
+  ): void {
+    this.onBaseOverlay = onBase;
+    this.onTopOverlay = onTop;
+    this.scheduler.invalidate(DirtyFlag.FULL | DirtyFlag.CURSOR);
+  }
+
+  setPointerInterceptor(
+    interceptor: {
+      onDown: (x: number, y: number, paneId: string) => boolean;
+      onMove: (x: number, y: number) => boolean;
+      onUp: () => boolean;
+    } | null,
+  ): void {
+    this.pointerInterceptor = interceptor;
+  }
+
+  requestRedraw(full = true): void {
+    this.scheduler.invalidate(full ? DirtyFlag.FULL | DirtyFlag.CURSOR : DirtyFlag.CURSOR);
+  }
+
+  /**
+   * Synchronize crosshair time from a sibling chart tile across different timeframes!
+   * Updates topCanvas ONLY (zero baseCanvas redraw).
+   */
+  setExternalCrosshairTime(timeMs: number | null): void {
+    if (timeMs === null || this.plotList.length === 0) {
+      if (this.crosshair.visible) {
+        this.crosshair = { ...this.crosshair, visible: false };
+        this.scheduler.invalidate(DirtyFlag.CURSOR);
+      }
+      return;
+    }
+    const barIndex = this.plotList.findIndexByTime(timeMs);
+    const x = this.timeScale.indexToCoordinate(barIndex);
+    const bar = this.plotList.getBar(barIndex);
+    const y = bar ? this.mainPriceScale.priceToCoordinate(bar.close) : -10;
+    this.crosshair = { visible: true, x, y, paneId: 'main', barIndex, price: bar?.close ?? null };
+    this.scheduler.invalidate(DirtyFlag.CURSOR);
+  }
+
+  getBarTimeAt(barIndex: number): number | null {
+    return this.plotList.getBar(barIndex)?.time ?? null;
+  }
+
+  getMainCoordBridge() {
+    const m = this.canvasPair?.metrics ?? {
+      horizontalPixelRatio: 1,
+      verticalPixelRatio: 1,
+    };
+    const mainPane = this.layout.panes[0]?.rect ?? { x: 0, y: 0, width: 800, height: 400 };
+    return {
+      paneRect: mainPane,
+      horizontalPixelRatio: m.horizontalPixelRatio,
+      verticalPixelRatio: m.verticalPixelRatio,
+      indexToX: (idx: number) => this.timeScale.indexToCoordinate(idx),
+      xToIndex: (x: number) => this.timeScale.coordinateToIndex(x),
+      priceToY: (p: number) => this.mainPriceScale.priceToCoordinate(p),
+      yToPrice: (y: number) => this.mainPriceScale.coordinateToPrice(y),
+      timeToIndex: (t: number) => this.plotList.findIndexByTime(t),
+      indexToTime: (idx: number) => this.plotList.getBar(idx)?.time ?? null,
+      getBar: (idx: number) => this.plotList.getBar(idx),
+      firstBarIndex: () => this.plotList.firstIndex(),
+      lastBarIndex: () => this.plotList.lastIndex(),
+      formatPrice: (p: number) => this.mainPriceScale.formatPrice(p),
+    };
+  }
+
   private emitCrosshair(): void {
     for (const fn of this.crosshairListeners) {
       fn(this.crosshair);
@@ -448,6 +528,7 @@ export class ChartController {
         mainPriceScale: this.mainPriceScale,
         calendar: this.calendar,
         subPanes: this.subPanes,
+        ...(this.onBaseOverlay ? { onMainPaneBaseOverlay: this.onBaseOverlay } : {}),
       });
 
       const dt = performance.now() - t0;
@@ -480,6 +561,7 @@ export class ChartController {
         subPanes: this.subPanes,
         crosshair: this.crosshair,
         hoveredDividerIndex: this.hoveredDividerIndex,
+        ...(this.onTopOverlay ? { onMainPaneTopOverlay: this.onTopOverlay } : {}),
       });
     }
   }

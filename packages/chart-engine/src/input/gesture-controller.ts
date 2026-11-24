@@ -12,6 +12,9 @@ export interface GestureCallbacks {
   onHoverDivider: (dividerIndex: number | null) => void;
   onCrosshairMove: (x: number, y: number, paneId: string) => void;
   onCrosshairLeave: () => void;
+  onInterceptPointerDown?: (x: number, y: number, paneId: string) => boolean;
+  onInterceptPointerMove?: (x: number, y: number) => boolean;
+  onInterceptPointerUp?: () => boolean;
 }
 
 type DragMode =
@@ -129,9 +132,14 @@ export class GestureController {
     }
 
     if (x < layout.plotWidth && y < layout.plotHeight) {
+      const paneId = this.hitPaneId(y, layout);
+      if (this.cb.onInterceptPointerDown?.(x, y, paneId)) {
+        this.el.setPointerCapture?.(ev.pointerId);
+        return;
+      }
       this.drag = {
         kind: 'pan',
-        paneId: this.hitPaneId(y, layout),
+        paneId,
         lastX: x,
         lastY: y,
         vx: 0,
@@ -195,6 +203,12 @@ export class GestureController {
       return;
     }
 
+    if (this.cb.onInterceptPointerMove?.(x, y)) {
+      const layout = this.cb.getLayout();
+      this.cb.onCrosshairMove(x, y, this.hitPaneId(y, layout));
+      return;
+    }
+
     // Idle hover: cursor feedback & lightweight topCanvas crosshair update
     const layout = this.cb.getLayout();
     const inside = x >= 0 && y >= 0 && x <= layout.totalWidth && y <= layout.totalHeight;
@@ -226,6 +240,9 @@ export class GestureController {
     this.activePointers.delete(ev.pointerId);
     if (this.activePointers.size < 2) {
       this.lastPinchDist = null;
+    }
+    if (this.cb.onInterceptPointerUp?.()) {
+      return;
     }
     if (this.drag.kind === 'pan') {
       const paneId = this.drag.paneId;
