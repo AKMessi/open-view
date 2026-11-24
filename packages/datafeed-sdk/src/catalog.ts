@@ -462,10 +462,34 @@ export const DEFAULT_WATCHLIST_IDS: readonly string[] = [
 ];
 
 const catalogById = new Map<string, SymbolInfo>(SYMBOL_CATALOG.map((s) => [s.id.toUpperCase(), s]));
+const dynamicSymbolRegistry = new Map<string, SymbolInfo>();
+
+export function registerDynamicSymbol(sym: SymbolInfo): void {
+  const key = sym.id.trim().toUpperCase();
+  if (!catalogById.has(key)) {
+    dynamicSymbolRegistry.set(key, sym);
+  }
+}
+
+export function refineSymbolPrecision(sym: SymbolInfo, refPrice: number): SymbolInfo {
+  if (!Number.isFinite(refPrice) || refPrice <= 0) return sym;
+  // Preserve explicit curated precision for major instruments; refine sub-cent dynamic assets (e.g. PEPEUSDT)
+  const abs = Math.abs(refPrice);
+  if (abs < 0.0001 && sym.precision < 8) {
+    return { ...sym, tickSize: 1e-8, precision: 8 };
+  }
+  if (abs < 0.01 && sym.precision < 6) {
+    return { ...sym, tickSize: 1e-6, precision: 6 };
+  }
+  if (abs < 1 && sym.precision < 4) {
+    return { ...sym, tickSize: 1e-4, precision: 4 };
+  }
+  return sym;
+}
 
 export function findSymbolById(symbolId: string): SymbolInfo | null {
   const key = symbolId.trim().toUpperCase();
-  const exact = catalogById.get(key);
+  const exact = catalogById.get(key) ?? dynamicSymbolRegistry.get(key);
   if (exact) return exact;
 
   // Dynamic symbol fallback (e.g., user types BINANCE:DOGEUSDT or US:GOOGL or NSE:WIPRO)

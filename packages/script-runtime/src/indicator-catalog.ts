@@ -56,6 +56,7 @@ export function computeBuiltinIndicators(
   activeIds: readonly string[],
   bars: readonly OHLCVBar[],
   symbol: SymbolInfo,
+  startBarIndex = 0,
 ): ComputedIndicators {
   const t0 = performance.now();
   const n = bars.length;
@@ -80,19 +81,19 @@ export function computeBuiltinIndicators(
   for (const id of activeIds) {
     switch (id) {
       case 'ema20':
-        overlays.push({ id, title: 'EMA 20', kind: 'line', color: '#2962ff', startBarIndex: 0, values: wasm.taEma(close, 20) });
+        overlays.push({ id, title: 'EMA 20', kind: 'line', color: '#2962ff', startBarIndex, values: wasm.taEma(close, 20) });
         break;
       case 'ema50':
-        overlays.push({ id, title: 'EMA 50', kind: 'line', color: '#ff9800', startBarIndex: 0, values: wasm.taEma(close, 50) });
+        overlays.push({ id, title: 'EMA 50', kind: 'line', color: '#ff9800', startBarIndex, values: wasm.taEma(close, 50) });
         break;
       case 'ema200':
-        overlays.push({ id, title: 'EMA 200', kind: 'line', color: '#e91e63', lineWidth: 2, startBarIndex: 0, values: wasm.taEma(close, 200) });
+        overlays.push({ id, title: 'EMA 200', kind: 'line', color: '#e91e63', lineWidth: 2, startBarIndex, values: wasm.taEma(close, 200) });
         break;
       case 'sma20':
-        overlays.push({ id, title: 'SMA 20', kind: 'line', color: '#26c6da', startBarIndex: 0, values: wasm.taSma(close, 20) });
+        overlays.push({ id, title: 'SMA 20', kind: 'line', color: '#26c6da', startBarIndex, values: wasm.taSma(close, 20) });
         break;
       case 'hma21':
-        overlays.push({ id, title: 'HMA 21', kind: 'line', color: '#ab47bc', lineWidth: 2, startBarIndex: 0, values: wasm.taHma(close, 21) });
+        overlays.push({ id, title: 'HMA 21', kind: 'line', color: '#ab47bc', lineWidth: 2, startBarIndex, values: wasm.taHma(close, 21) });
         break;
       case 'bb20': {
         const flat = wasm.taBollingerBands(close, 20, 2);
@@ -101,7 +102,7 @@ export function computeBuiltinIndicators(
           title: 'BB (20, 2)',
           kind: 'band_fill',
           color: '#2962ff',
-          startBarIndex: 0,
+          startBarIndex,
           values: flat.subarray(0, n),
           extraValues: flat.subarray(n, 2 * n),
           lowerValues: flat.subarray(2 * n, 3 * n),
@@ -115,7 +116,7 @@ export function computeBuiltinIndicators(
           title: 'KC (20, 2)',
           kind: 'band_fill',
           color: '#26a69a',
-          startBarIndex: 0,
+          startBarIndex,
           values: flat.subarray(0, n),
           extraValues: flat.subarray(n, 2 * n),
           lowerValues: flat.subarray(2 * n, 3 * n),
@@ -129,7 +130,7 @@ export function computeBuiltinIndicators(
           title: 'DC (20)',
           kind: 'band_fill',
           color: '#7e57c2',
-          startBarIndex: 0,
+          startBarIndex,
           values: flat.subarray(0, n),
           extraValues: flat.subarray(n, 2 * n),
           lowerValues: flat.subarray(2 * n, 3 * n),
@@ -144,7 +145,7 @@ export function computeBuiltinIndicators(
           kind: 'supertrend',
           color: '#089981',
           lineWidth: 2,
-          startBarIndex: 0,
+          startBarIndex,
           values: flat.subarray(0, n),
           extraValues: flat.subarray(n, 2 * n),
         });
@@ -165,7 +166,7 @@ export function computeBuiltinIndicators(
           kind: 'band_fill',
           color: '#f7931a',
           lineWidth: 2,
-          startBarIndex: 0,
+          startBarIndex,
           values: flat.subarray(0, n),
           extraValues: flat.subarray(n, 2 * n),
           lowerValues: flat.subarray(2 * n, 3 * n),
@@ -177,7 +178,7 @@ export function computeBuiltinIndicators(
           paneId: 'rsi14',
           fixedRange: [0, 100],
           plots: [
-            { id: 'rsi14', title: 'RSI (14)', color: '#7e57c2', kind: 'line', startBarIndex: 0, values: wasm.taRsi(close, 14), refLines: [30, 70] },
+            { id: 'rsi14', title: 'RSI (14)', color: '#7e57c2', kind: 'line', startBarIndex, values: wasm.taRsi(close, 14), refLines: [30, 70] },
           ],
         });
         break;
@@ -186,9 +187,9 @@ export function computeBuiltinIndicators(
         subPanes.push({
           paneId: 'macd',
           plots: [
-            { id: 'macd_hist', title: 'MACD Hist', color: '#089981', kind: 'histogram', startBarIndex: 0, values: flat.subarray(2 * n, 3 * n), refLines: [0] },
-            { id: 'macd_line', title: 'MACD', color: '#2962ff', kind: 'line', startBarIndex: 0, values: flat.subarray(0, n) },
-            { id: 'macd_sig', title: 'Signal', color: '#ff9800', kind: 'line', startBarIndex: 0, values: flat.subarray(n, 2 * n) },
+            { id: 'macd_hist', title: 'MACD Hist', color: '#089981', kind: 'histogram', startBarIndex, values: flat.subarray(2 * n, 3 * n), refLines: [0] },
+            { id: 'macd_line', title: 'MACD', color: '#2962ff', kind: 'line', startBarIndex, values: flat.subarray(0, n) },
+            { id: 'macd_sig', title: 'Signal', color: '#ff9800', kind: 'line', startBarIndex, values: flat.subarray(n, 2 * n) },
           ],
         });
         break;
@@ -199,8 +200,8 @@ export function computeBuiltinIndicators(
           paneId: 'stoch14',
           fixedRange: [0, 100],
           plots: [
-            { id: 'stoch_k', title: '%K', color: '#2962ff', kind: 'line', startBarIndex: 0, values: flat.subarray(0, n), refLines: [20, 80] },
-            { id: 'stoch_d', title: '%D', color: '#ff9800', kind: 'line', startBarIndex: 0, values: flat.subarray(n, 2 * n) },
+            { id: 'stoch_k', title: '%K', color: '#2962ff', kind: 'line', startBarIndex, values: flat.subarray(0, n), refLines: [20, 80] },
+            { id: 'stoch_d', title: '%D', color: '#ff9800', kind: 'line', startBarIndex, values: flat.subarray(n, 2 * n) },
           ],
         });
         break;
@@ -208,7 +209,7 @@ export function computeBuiltinIndicators(
       case 'atr14':
         subPanes.push({
           paneId: 'atr14',
-          plots: [{ id: 'atr14', title: 'ATR (14)', color: '#f23645', kind: 'line', startBarIndex: 0, values: wasm.taAtr(high, low, close, 14) }],
+          plots: [{ id: 'atr14', title: 'ATR (14)', color: '#f23645', kind: 'line', startBarIndex, values: wasm.taAtr(high, low, close, 14) }],
         });
         break;
       case 'adx14': {
@@ -217,9 +218,9 @@ export function computeBuiltinIndicators(
           paneId: 'adx14',
           fixedRange: [0, 75],
           plots: [
-            { id: 'adx_pdi', title: '+DI', color: '#089981', kind: 'line', startBarIndex: 0, values: flat.subarray(0, n), refLines: [25] },
-            { id: 'adx_mdi', title: '-DI', color: '#f23645', kind: 'line', startBarIndex: 0, values: flat.subarray(n, 2 * n) },
-            { id: 'adx_val', title: 'ADX', color: '#f7931a', kind: 'line', startBarIndex: 0, values: flat.subarray(2 * n, 3 * n) },
+            { id: 'adx_pdi', title: '+DI', color: '#089981', kind: 'line', startBarIndex, values: flat.subarray(0, n), refLines: [25] },
+            { id: 'adx_mdi', title: '-DI', color: '#f23645', kind: 'line', startBarIndex, values: flat.subarray(n, 2 * n) },
+            { id: 'adx_val', title: 'ADX', color: '#f7931a', kind: 'line', startBarIndex, values: flat.subarray(2 * n, 3 * n) },
           ],
         });
         break;
@@ -227,20 +228,20 @@ export function computeBuiltinIndicators(
       case 'cci20':
         subPanes.push({
           paneId: 'cci20',
-          plots: [{ id: 'cci20', title: 'CCI (20)', color: '#26c6da', kind: 'line', startBarIndex: 0, values: wasm.taCci(high, low, close, 20), refLines: [-100, 100] }],
+          plots: [{ id: 'cci20', title: 'CCI (20)', color: '#26c6da', kind: 'line', startBarIndex, values: wasm.taCci(high, low, close, 20), refLines: [-100, 100] }],
         });
         break;
       case 'mfi14':
         subPanes.push({
           paneId: 'mfi14',
           fixedRange: [0, 100],
-          plots: [{ id: 'mfi14', title: 'MFI (14)', color: '#ab47bc', kind: 'line', startBarIndex: 0, values: wasm.taMfi(high, low, close, volume, 14), refLines: [20, 80] }],
+          plots: [{ id: 'mfi14', title: 'MFI (14)', color: '#ab47bc', kind: 'line', startBarIndex, values: wasm.taMfi(high, low, close, volume, 14), refLines: [20, 80] }],
         });
         break;
       case 'obv':
         subPanes.push({
           paneId: 'obv',
-          plots: [{ id: 'obv', title: 'OBV', color: '#2962ff', kind: 'line', startBarIndex: 0, values: wasm.taObv(close, volume) }],
+          plots: [{ id: 'obv', title: 'OBV', color: '#2962ff', kind: 'line', startBarIndex, values: wasm.taObv(close, volume) }],
         });
         break;
     }

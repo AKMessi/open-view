@@ -40,6 +40,58 @@ describe('Phase 1 — Clean-Room Chart Engine Core Invariants', () => {
     expect(plot.getBar(2)?.time).toBe(2000);
   });
 
+  it('strictly rejects stale out-of-order timestamps and deduplicates prepend seams (prevents duplicate candle storms)', () => {
+    const plot = new MipmapPlotList();
+    const day0 = Date.UTC(2026, 10, 23, 0, 0, 0);
+    const day1 = Date.UTC(2026, 10, 24, 0, 0, 0);
+    const staleIntraday = Date.UTC(2026, 10, 23, 19, 30, 0);
+
+    plot.setBars([
+      { time: day0, open: 61000, high: 62000, low: 60500, close: 61270, volume: 12000 },
+      { time: day1, open: 61270, high: 61682, low: 59260, close: 59760, volume: 17970 },
+    ]);
+
+    // Simulate alternating stale 19:30 and live 00:00 ticks — MUST NEVER append duplicate bars!
+    for (let i = 0; i < 20; i++) {
+      const staleRes = plot.upsertBar({
+        time: staleIntraday,
+        open: 59700,
+        high: 59800,
+        low: 59600,
+        close: 59750,
+        volume: 500,
+      });
+      expect(staleRes.appended).toBe(false);
+      expect(staleRes.rejected).toBe(true);
+
+      const liveRes = plot.upsertBar({
+        time: day1,
+        open: 61270,
+        high: 61682,
+        low: 59260,
+        close: 59650 + i,
+        volume: 17970 + i,
+      });
+      expect(liveRes.appended).toBe(false);
+      expect(liveRes.rejected).toBeUndefined();
+    }
+
+    expect(plot.length).toBe(2);
+    expect(plot.getLastBar()?.time).toBe(day1);
+    expect(plot.getLastBar()?.close).toBe(59669);
+
+    // Prepend overlapping seam bar -> must skip day0 duplicate and only prepend strictly older bar
+    const dayMinus1 = Date.UTC(2026, 10, 22, 0, 0, 0);
+    const added = plot.prependBars([
+      { time: dayMinus1, open: 60000, high: 61100, low: 59900, close: 61000, volume: 9000 },
+      { time: day0, open: 61000, high: 62000, low: 60500, close: 61270, volume: 12000 },
+    ]);
+    expect(added).toBe(1);
+    expect(plot.length).toBe(3);
+    expect(plot.firstIndex()).toBe(-1);
+    expect(plot.getBar(-1)?.time).toBe(dayMinus1);
+  });
+
   it('provides pan-invariant power-of-2 mipmaps and queries 250,000 bars in < 2.5ms', () => {
     const bars = generateSyntheticBars(DEMO_SYMBOLS['BINANCE:BTCUSDT']!, '1', 250_000, 77);
     const plot = new MipmapPlotList();

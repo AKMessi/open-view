@@ -140,14 +140,27 @@ export class MipmapPlotList {
       return olderBars.length;
     }
 
+    // Deduplicate against existing oldest bar so lazy-history seams never duplicate timestamps
+    const oldestExistingTime = this.chunks[0]?.length ? this.chunks[0]!.time[0]! : Infinity;
+    const filtered = olderBars.filter(
+      (b) =>
+        Number.isFinite(b.time) &&
+        Number.isFinite(b.open) &&
+        Number.isFinite(b.high) &&
+        Number.isFinite(b.low) &&
+        Number.isFinite(b.close) &&
+        b.time < oldestExistingTime,
+    );
+    if (filtered.length === 0) return 0;
+
     const newChunks: BarChunk[] = [];
-    let logicalStart = this.firstIndex() - olderBars.length;
+    let logicalStart = this.firstIndex() - filtered.length;
     let offset = 0;
-    while (offset < olderBars.length) {
+    while (offset < filtered.length) {
       const chunk = createChunk(logicalStart);
-      const take = Math.min(CHUNK_CAPACITY, olderBars.length - offset);
+      const take = Math.min(CHUNK_CAPACITY, filtered.length - offset);
       for (let i = 0; i < take; i++) {
-        const b = olderBars[offset + i]!;
+        const b = filtered[offset + i]!;
         chunk.time[i] = b.time;
         chunk.open[i] = b.open;
         chunk.high[i] = b.high;
@@ -163,25 +176,45 @@ export class MipmapPlotList {
 
     // Splice references only — zero copying of existing TypedArrays
     this.chunks = [...newChunks, ...this.chunks];
-    this.totalCount += olderBars.length;
+    this.totalCount += filtered.length;
     this.version++;
-    return olderBars.length;
+    return filtered.length;
   }
 
   /**
    * Append a new bar, or update the rightmost bar in-place if bar.time matches
    * (unless allowDuplicateTimestamp is true for non-time charts like Renko/Range).
+   * Strictly rejects stale out-of-order timestamps (bar.time < lastTime) in time-bar mode
+   * so delayed/reconnected ticks can NEVER create ping-pong duplicate candles!
    */
-  upsertBar(bar: OHLCVBar, allowDuplicateTimestamp = false): { appended: boolean; barIndex: number } {
+  upsertBar(
+    bar: OHLCVBar,
+    allowDuplicateTimestamp = false,
+  ): { appended: boolean; barIndex: number; rejected?: boolean } {
+    if (
+      !Number.isFinite(bar.time) ||
+      !Number.isFinite(bar.open) ||
+      !Number.isFinite(bar.high) ||
+      !Number.isFinite(bar.low) ||
+      !Number.isFinite(bar.close)
+    ) {
+      return { appended: false, barIndex: this.lastIndex(), rejected: true };
+    }
+
     const lastChunk = this.chunks[this.chunks.length - 1];
     if (lastChunk && lastChunk.length > 0 && !allowDuplicateTimestamp) {
       const slot = lastChunk.length - 1;
-      if (lastChunk.time[slot] === bar.time) {
+      const lastTime = lastChunk.time[slot]!;
+      if (bar.time < lastTime) {
+        // Drop stale out-of-order tick rather than appending a backwards duplicate bar!
+        return { appended: false, barIndex: lastChunk.startIndex + slot, rejected: true };
+      }
+      if (bar.time === lastTime) {
         lastChunk.open[slot] = bar.open;
         lastChunk.high[slot] = bar.high;
         lastChunk.low[slot] = bar.low;
         lastChunk.close[slot] = bar.close;
-        lastChunk.volume[slot] = bar.volume;
+        lastChunk.volume[slot] = Number.isFinite(bar.volume) ? bar.volume : 0;
         this.version++;
         return { appended: false, barIndex: lastChunk.startIndex + slot };
       }
@@ -199,7 +232,7 @@ export class MipmapPlotList {
     target.high[slot] = bar.high;
     target.low[slot] = bar.low;
     target.close[slot] = bar.close;
-    target.volume[slot] = bar.volume;
+    target.volume[slot] = Number.isFinite(bar.volume) ? bar.volume : 0;
     target.length++;
     this.totalCount++;
     this.version++;

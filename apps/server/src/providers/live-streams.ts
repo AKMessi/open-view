@@ -51,6 +51,37 @@ export function toYahooSymbol(symbol: SymbolInfo): string {
   return `${t.replace(/1!$/, '')}.NS`;
 }
 
+const YAHOO_HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'] as const;
+const YAHOO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  Accept: 'application/json',
+};
+
+const quoteCache = new Map<string, { quote: QuoteTick; fetchedAt: number }>();
+const quoteInFlight = new Map<string, Promise<QuoteTick | null>>();
+const QUOTE_TTL_MS = 8_000;
+
+export function getCachedQuote(symbolId: string): QuoteTick | null {
+  return quoteCache.get(symbolId.toUpperCase())?.quote ?? null;
+}
+
+async function fetchYahooJsonWithFailover(pathAndQuery: string, timeoutMs = 5000): Promise<unknown | null> {
+  for (const host of YAHOO_HOSTS) {
+    try {
+      const res = await fetch(`${host}${pathAndQuery}`, {
+        headers: YAHOO_HEADERS,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // failover to next host
+    }
+  }
+  return null;
+}
+
 export async function fetchYahooIntradayBars(
   symbol: SymbolInfo,
   resolution: Resolution,
@@ -81,13 +112,10 @@ export async function fetchYahooIntradayBars(
             ? '30d'
             : '60d';
 
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySym)}?interval=${interval}&range=${range}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OpenView/0.3' },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return { bars: [] };
-    const json = (await res.json()) as {
+    const json = (await fetchYahooJsonWithFailover(
+      `/v8/finance/chart/${encodeURIComponent(ySym)}?interval=${interval}&range=${range}`,
+      5500,
+    )) as {
       chart?: {
         result?: Array<{
           meta?: {
@@ -108,14 +136,15 @@ export async function fetchYahooIntradayBars(
           };
         }>;
       };
-    };
+    } | null;
 
+    if (!json) return { bars: [] };
     const r0 = json.chart?.result?.[0];
     const ts = r0?.timestamp ?? [];
     const q = r0?.indicators?.quote?.[0];
     if (!q || ts.length === 0) return { bars: [] };
 
-    const out: OHLCVBar[] = [];
+    const raw: OHLCVBar[] = [];
     for (let i = 0; i < ts.length; i++) {
       const o = q.open?.[i];
       const h = q.high?.[i];
@@ -123,14 +152,26 @@ export async function fetchYahooIntradayBars(
       const c = q.close?.[i];
       const v = q.volume?.[i] ?? 0;
       if (o == null || h == null || l == null || c == null) continue;
-      out.push({
+      if (!Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c)) continue;
+      raw.push({
         time: ts[i]! * 1000,
         open: o,
         high: h,
         low: l,
         close: c,
-        volume: symbol.hasVolume ? v : 0,
+        volume: symbol.hasVolume && Number.isFinite(v) ? v : 0,
       });
+    }
+
+    // Strict ascending sort + deduplicate identical bar timestamps (Yahoo occasionally duplicates the last daily bar!)
+    raw.sort((a, b) => a.time - b.time);
+    const out: OHLCVBar[] = [];
+    for (const bar of raw) {
+      if (out.length > 0 && out[out.length - 1]!.time === bar.time) {
+        out[out.length - 1] = bar;
+      } else {
+        out.push(bar);
+      }
     }
 
     const metaPrice = r0?.meta?.regularMarketPrice;
@@ -146,49 +187,69 @@ export async function fetchYahooIntradayBars(
 }
 
 export async function fetchYahooLatestQuote(symbol: SymbolInfo): Promise<QuoteTick | null> {
-  try {
-    const ySym = toYahooSymbol(symbol);
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySym)}?interval=1m&range=1d`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OpenView/0.3' },
-      signal: AbortSignal.timeout(4500),
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as {
-      chart?: {
-        result?: Array<{
-          meta?: {
-            regularMarketPrice?: number;
-            regularMarketVolume?: number;
-            previousClose?: number;
-            chartPreviousClose?: number;
-            regularMarketTime?: number;
-          };
-        }>;
-      };
-    };
-    const meta = json.chart?.result?.[0]?.meta;
-    if (!meta || typeof meta.regularMarketPrice !== 'number') return null;
-
-    const last = meta.regularMarketPrice;
-    const prev = meta.previousClose ?? meta.chartPreviousClose ?? last;
-    const change = last - prev;
-    const changePct = prev !== 0 ? (change / prev) * 100 : 0;
-
-    return {
-      symbol: symbol.id,
-      last,
-      change,
-      changePct,
-      ...(symbol.hasVolume && typeof meta.regularMarketVolume === 'number'
-        ? { volume: meta.regularMarketVolume }
-        : {}),
-      timestamp: (meta.regularMarketTime ?? Math.floor(Date.now() / 1000)) * 1000,
-      feedQuality: symbol.calendarId === 'FOREX_OTC' ? 'live_quote_zero_vol' : 'delayed_eod',
-    };
-  } catch {
-    return null;
+  const key = symbol.id.toUpperCase();
+  const cached = quoteCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < QUOTE_TTL_MS) {
+    return cached.quote;
   }
+
+  const pending = quoteInFlight.get(key);
+  if (pending) return pending;
+
+  const task = (async (): Promise<QuoteTick | null> => {
+    try {
+      const ySym = toYahooSymbol(symbol);
+      // Lightweight ~1.2 KB payload (50x smaller than interval=1m&range=1d!) to prevent Yahoo 429 rate-limits
+      const json = (await fetchYahooJsonWithFailover(
+        `/v8/finance/chart/${encodeURIComponent(ySym)}?interval=1d&range=5d&includePrePost=false`,
+        4500,
+      )) as {
+        chart?: {
+          result?: Array<{
+            meta?: {
+              regularMarketPrice?: number;
+              regularMarketVolume?: number;
+              previousClose?: number;
+              chartPreviousClose?: number;
+              regularMarketTime?: number;
+            };
+          }>;
+        };
+      } | null;
+
+      const meta = json?.chart?.result?.[0]?.meta;
+      if (!meta || typeof meta.regularMarketPrice !== 'number' || !Number.isFinite(meta.regularMarketPrice)) {
+        // Return last known good cached quote rather than blanking out Watchlist prices on a transient blip!
+        return quoteCache.get(key)?.quote ?? null;
+      }
+
+      const last = meta.regularMarketPrice;
+      const prev = meta.previousClose ?? meta.chartPreviousClose ?? last;
+      const change = last - prev;
+      const changePct = prev !== 0 ? (change / prev) * 100 : 0;
+
+      const tick: QuoteTick = {
+        symbol: symbol.id,
+        last,
+        change,
+        changePct,
+        ...(symbol.hasVolume && typeof meta.regularMarketVolume === 'number'
+          ? { volume: meta.regularMarketVolume }
+          : {}),
+        timestamp: (meta.regularMarketTime ?? Math.floor(Date.now() / 1000)) * 1000,
+        feedQuality: symbol.calendarId === 'FOREX_OTC' ? 'live_quote_zero_vol' : 'delayed_eod',
+      };
+      quoteCache.set(key, { quote: tick, fetchedAt: Date.now() });
+      return tick;
+    } catch {
+      return quoteCache.get(key)?.quote ?? null;
+    } finally {
+      quoteInFlight.delete(key);
+    }
+  })();
+
+  quoteInFlight.set(key, task);
+  return task;
 }
 
 /**
@@ -214,7 +275,16 @@ export class FormingBarBuilder {
     ).openTime;
     const vol = this.symbol.hasVolume && Number.isFinite(size) ? Math.max(0, size) : 0;
 
-    if (!this.current || bucket > this.current.time) {
+    if (!this.current) {
+      this.current = {
+        time: bucket,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume: vol,
+      };
+    } else if (bucket > this.current.time) {
       this.current = {
         time: bucket,
         open: price,
@@ -224,6 +294,7 @@ export class FormingBarBuilder {
         volume: vol,
       };
     } else {
+      // Never regress timestamp backwards; fold cleanly into active tail bar
       this.current.high = Math.max(this.current.high, price);
       this.current.low = Math.min(this.current.low, price);
       this.current.close = price;

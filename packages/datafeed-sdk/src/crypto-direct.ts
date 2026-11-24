@@ -23,6 +23,29 @@ const BINANCE_INTERVAL_MAP: Record<Resolution, string> = {
 
 const PROACTIVE_ROLLOVER_MS = (23 * 60 + 50) * 60_000; // 23h50m before Binance 24h cap
 
+function normalizeSortedUniqueBars(bars: OHLCVBar[]): OHLCVBar[] {
+  if (bars.length <= 1) return bars;
+  bars.sort((a, b) => a.time - b.time);
+  const out: OHLCVBar[] = [];
+  for (const b of bars) {
+    if (
+      !Number.isFinite(b.time) ||
+      !Number.isFinite(b.open) ||
+      !Number.isFinite(b.high) ||
+      !Number.isFinite(b.low) ||
+      !Number.isFinite(b.close)
+    ) {
+      continue;
+    }
+    if (out.length > 0 && out[out.length - 1]!.time === b.time) {
+      out[out.length - 1] = b;
+    } else {
+      out.push(b);
+    }
+  }
+  return out;
+}
+
 /**
  * Direct Browser-Compatible Crypto Datafeed (works 100% in Static Mode with zero backend!).
  * - Spot: Binance Public Vision (`data-api.binance.vision` + `wss://data-stream.binance.vision/ws`)
@@ -75,14 +98,16 @@ export class BinanceDirectDatafeed implements IDatafeed {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const rows = (await res.json()) as Array<[number, string, string, string, string, string]>;
-      const bars: OHLCVBar[] = rows.map((r) => ({
-        time: Number(r[0]),
-        open: Number(r[1]),
-        high: Number(r[2]),
-        low: Number(r[3]),
-        close: Number(r[4]),
-        volume: Number(r[5]),
-      }));
+      const bars = normalizeSortedUniqueBars(
+        rows.map((r) => ({
+          time: Number(r[0]),
+          open: Number(r[1]),
+          high: Number(r[2]),
+          low: Number(r[3]),
+          close: Number(r[4]),
+          volume: Number(r[5]),
+        })),
+      );
       return {
         bars,
         noData: bars.length === 0,
@@ -313,6 +338,9 @@ export class BinanceDirectDatafeed implements IDatafeed {
     const spotTickers = symbols
       .filter((s) => s.startsWith('BINANCE:') && !s.endsWith('.P'))
       .map((s) => s.slice('BINANCE:'.length).toUpperCase());
+    const perpTickers = symbols
+      .filter((s) => s.startsWith('BINANCE:') && s.endsWith('.P'))
+      .map((s) => s.slice('BINANCE:'.length).replace(/\.P$/i, '').toUpperCase());
     const hlCoins = symbols
       .filter((s) => s.startsWith('HYPERLIQUID:'))
       .map((s) => ({
@@ -320,10 +348,11 @@ export class BinanceDirectDatafeed implements IDatafeed {
         coin: s.slice('HYPERLIQUID:'.length).replace(/-PERP$/i, '').toUpperCase(),
       }));
 
-    if (spotTickers.length === 0 && hlCoins.length === 0) return () => {};
+    if (spotTickers.length === 0 && perpTickers.length === 0 && hlCoins.length === 0) return () => {};
 
     let closed = false;
     let hlWs: WebSocket | null = null;
+    let hlRetry: ReturnType<typeof setTimeout> | null = null;
     if (hlCoins.length > 0) {
       const coinMap = new Map(hlCoins.map((c) => [c.coin, c.symbolId]));
       const prevPx = new Map<string, number>();
@@ -363,49 +392,126 @@ export class BinanceDirectDatafeed implements IDatafeed {
             // ignore
           }
         };
+        hlWs.onclose = () => {
+          if (!closed) hlRetry = setTimeout(connectHl, 3000);
+        };
         hlWs.onerror = () => hlWs?.close();
       };
       connectHl();
     }
 
+    // Binance USD-M Perpetual Futures live quotes (BINANCE:BTCUSDT.P etc.)
+    let perpWs: WebSocket | null = null;
+    let perpRetry: ReturnType<typeof setTimeout> | null = null;
+    if (perpTickers.length > 0) {
+      for (const ticker of perpTickers) {
+        void fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(ticker)}`, {
+          signal: AbortSignal.timeout(4000),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((raw: unknown) => {
+            if (closed || !raw || typeof raw !== 'object') return;
+            const r = raw as { symbol?: string; lastPrice?: string; priceChange?: string; priceChangePercent?: string; volume?: string };
+            if (!r.symbol || !r.lastPrice) return;
+            onQuote({
+              symbol: `BINANCE:${r.symbol}.P`,
+              last: Number(r.lastPrice),
+              change: Number(r.priceChange ?? 0),
+              changePct: Number(r.priceChangePercent ?? 0),
+              volume: Number(r.volume ?? 0),
+              timestamp: Date.now(),
+              feedQuality: 'live_full_vol',
+            });
+          })
+          .catch(() => {});
+      }
+      const pStreams = perpTickers.map((t) => `${t.toLowerCase()}@miniTicker`).join('/');
+      const connectPerp = () => {
+        if (closed) return;
+        perpWs = new WebSocket(`wss://fstream.binance.com/stream?streams=${pStreams}`);
+        perpWs.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(String(ev.data)) as {
+              data?: { s: string; c: string; o: string; v: string; E: number };
+            };
+            if (!msg.data) return;
+            const last = Number(msg.data.c);
+            const open = Number(msg.data.o);
+            const change = last - open;
+            onQuote({
+              symbol: `BINANCE:${msg.data.s}.P`,
+              last,
+              change,
+              changePct: open !== 0 ? (change / open) * 100 : 0,
+              volume: Number(msg.data.v),
+              timestamp: msg.data.E,
+              feedQuality: 'live_full_vol',
+            });
+          } catch {
+            // ignore
+          }
+        };
+        perpWs.onclose = () => {
+          if (!closed) perpRetry = setTimeout(connectPerp, 2500);
+        };
+        perpWs.onerror = () => perpWs?.close();
+      };
+      connectPerp();
+    }
+
     if (spotTickers.length === 0) {
       return () => {
         closed = true;
+        if (hlRetry) clearTimeout(hlRetry);
+        if (perpRetry) clearTimeout(perpRetry);
         hlWs?.close();
+        perpWs?.close();
       };
     }
 
-    // Immediate REST 24hr snapshot so prices populate in < 200ms before first WS tick
+    // Immediate REST 24hr snapshot (+ periodic backup if WS is temporarily offline)
     const encoded = encodeURIComponent(JSON.stringify(spotTickers));
-    void fetch(`https://data-api.binance.vision/api/v3/ticker/24hr?symbols=${encoded}`, {
-      signal: AbortSignal.timeout(4000),
-    })
-      .then((r) => (r.ok ? r.json() : []))
-      .then((raw: unknown) => {
-        if (closed || !Array.isArray(raw)) return;
-        const rows = raw as Array<{ symbol: string; lastPrice: string; priceChange: string; priceChangePercent: string; volume: string }>;
-        const now = Date.now();
-        for (const r of rows) {
-          onQuote({
-            symbol: `BINANCE:${r.symbol}`,
-            last: Number(r.lastPrice),
-            change: Number(r.priceChange),
-            changePct: Number(r.priceChangePercent),
-            volume: Number(r.volume),
-            timestamp: now,
-            feedQuality: 'live_full_vol',
-          });
-        }
+    const fetchSpotRestSnapshot = () => {
+      if (closed) return;
+      void fetch(`https://data-api.binance.vision/api/v3/ticker/24hr?symbols=${encoded}`, {
+        signal: AbortSignal.timeout(4000),
       })
-      .catch(() => {});
+        .then((r) => (r.ok ? r.json() : []))
+        .then((raw: unknown) => {
+          if (closed || !Array.isArray(raw)) return;
+          const rows = raw as Array<{ symbol: string; lastPrice: string; priceChange: string; priceChangePercent: string; volume: string }>;
+          const now = Date.now();
+          for (const r of rows) {
+            onQuote({
+              symbol: `BINANCE:${r.symbol}`,
+              last: Number(r.lastPrice),
+              change: Number(r.priceChange),
+              changePct: Number(r.priceChangePercent),
+              volume: Number(r.volume),
+              timestamp: now,
+              feedQuality: 'live_full_vol',
+            });
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetchSpotRestSnapshot();
 
     const streams = spotTickers.map((t) => `${t.toLowerCase()}@miniTicker`).join('/');
     let ws: WebSocket | null = null;
+    let wsOpen = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const restFallbackTimer = setInterval(() => {
+      if (!wsOpen) fetchSpotRestSnapshot();
+    }, 10_000);
 
     const connect = () => {
       if (closed) return;
       ws = new WebSocket(`wss://data-stream.binance.vision/stream?streams=${streams}`);
+      ws.onopen = () => {
+        wsOpen = true;
+      };
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(String(ev.data)) as {
@@ -430,6 +536,7 @@ export class BinanceDirectDatafeed implements IDatafeed {
         }
       };
       ws.onclose = () => {
+        wsOpen = false;
         if (!closed) retryTimer = setTimeout(connect, 2500);
       };
       ws.onerror = () => ws?.close();
@@ -438,9 +545,13 @@ export class BinanceDirectDatafeed implements IDatafeed {
     connect();
     return () => {
       closed = true;
+      clearInterval(restFallbackTimer);
       if (retryTimer) clearTimeout(retryTimer);
+      if (hlRetry) clearTimeout(hlRetry);
+      if (perpRetry) clearTimeout(perpRetry);
       ws?.close();
       hlWs?.close();
+      perpWs?.close();
     };
   }
 }

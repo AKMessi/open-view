@@ -14,7 +14,7 @@ import {
   type NonTimeChartMode,
   type SpreadAlignmentMode,
 } from '@openview/chart-types';
-import { findSymbolById } from '@openview/datafeed-sdk';
+import { findSymbolById, refineSymbolPrecision } from '@openview/datafeed-sdk';
 import type { PaperAccountSnapshot } from '@openview/broker-sdk';
 import type { DrawingManager } from '@openview/drawings';
 import type { ChartTileState, OHLCVBar, SymbolInfo } from '@openview/protocol';
@@ -136,6 +136,9 @@ export function ChartTile({
   const overlayFlagsRef = useRef({ showVrvp, showFootprint, showTpo });
   overlayFlagsRef.current = { showVrvp, showFootprint, showTpo };
   const mountedSubPanesRef = useRef<Set<string>>(new Set());
+  const subGenRef = useRef(0);
+  const liveIndicatorTimerRef = useRef<number | null>(null);
+  const lastTelemetryStrRef = useRef('');
   const [drawRev, setDrawRev] = useState(0);
 
   // Mount ChartController once per tile (strictly 2 canvases per tile!)
@@ -423,11 +426,21 @@ export function ChartTile({
     });
 
     const telemetryTimer = window.setInterval(() => {
-      if (onTelemetry) onTelemetry(ctrl.getTelemetry());
-    }, 350);
+      if (!onTelemetry) return;
+      const t = ctrl.getTelemetry();
+      const key = `${t.medianFrameMs}|${t.drawnBars}|${t.totalBars}`;
+      if (key !== lastTelemetryStrRef.current) {
+        lastTelemetryStrRef.current = key;
+        onTelemetry(t);
+      }
+    }, 750);
 
     return () => {
       window.clearInterval(telemetryTimer);
+      if (liveIndicatorTimerRef.current !== null) {
+        window.clearTimeout(liveIndicatorTimerRef.current);
+        liveIndicatorTimerRef.current = null;
+      }
       unsubCrosshairOut();
       unsubCrosshairIn();
       unsubDraw();
@@ -445,9 +458,10 @@ export function ChartTile({
   }, [isActive, controllerOutRef]);
 
   const recomputeIndicators = (ctrl: ChartController, bars: readonly OHLCVBar[], info: SymbolInfo) => {
+    const startBarIndex = ctrl.getFirstBarIndex();
     void loadBrowserWasm()
       .then((wasm) => {
-        const computed = computeBuiltinIndicators(wasm, activeIndicatorIds, bars, info);
+        const computed = computeBuiltinIndicators(wasm, activeIndicatorIds, bars, info, startBarIndex);
         const overlays = [...computed.overlays];
         const subPanes = [...computed.subPanes];
 
@@ -458,9 +472,14 @@ export function ChartTile({
           const customRes = isPine
             ? runPineScript(customScriptCode, bars, wasm)
             : runCustomIndicatorScript(customScriptCode, bars, wasm);
-          overlays.push(...customRes.overlays);
+          for (const ov of customRes.overlays) {
+            overlays.push({ ...ov, startBarIndex });
+          }
           if (customRes.subPanePlots.length > 0) {
-            subPanes.push({ paneId: 'custom_script', plots: customRes.subPanePlots });
+            subPanes.push({
+              paneId: 'custom_script',
+              plots: customRes.subPanePlots.map((p) => ({ ...p, startBarIndex })),
+            });
           }
           onScriptOutput?.(customRes.logs, customRes.elapsedMs, customRes.error);
         }
@@ -485,19 +504,33 @@ export function ChartTile({
       .catch(() => {});
   };
 
+  const scheduleLiveIndicatorRecompute = (ctrl: ChartController) => {
+    // Coalesce live indicator refreshes (450ms) so Rust/WASM indicators tick live smoothly with zero lag
+    if (liveIndicatorTimerRef.current !== null || barsRef.current.length > 5000) return;
+    liveIndicatorTimerRef.current = window.setTimeout(() => {
+      liveIndicatorTimerRef.current = null;
+      if (controllerRef.current === ctrl && barsRef.current.length > 0) {
+        recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
+      }
+    }, 450);
+  };
+
   const applyModeAndRender = (
     ctrl: ChartController,
     raw: OHLCVBar[],
     info: SymbolInfo,
     fitCount = 140,
   ) => {
+    const tailClose = raw[raw.length - 1]?.close;
+    const refinedInfo = tailClose !== undefined ? refineSymbolPrecision(info, tailClose) : info;
+    symbolRef.current = refinedInfo;
     rawBarsRef.current = raw;
     const displayBars = chartMode === 'standard' ? raw : transformNonTimeBars(raw, chartMode);
     barsRef.current = displayBars;
-    ctrl.setSymbolInfo(info, tile.resolution);
+    ctrl.setSymbolInfo(refinedInfo, tile.resolution);
     ctrl.setBars(displayBars, Math.min(fitCount, Math.max(40, displayBars.length)));
-    recomputeIndicators(ctrl, displayBars, info);
-    onBarsLoaded?.(displayBars, info);
+    recomputeIndicators(ctrl, displayBars, refinedInfo);
+    onBarsLoaded?.(displayBars, refinedInfo);
   };
 
   // Master-Clock Multi-TF Replay override
@@ -565,16 +598,36 @@ export function ChartTile({
       return;
     }
 
+    const gen = ++subGenRef.current;
     const unsub = client.subscribeChart(tile.id, tile.symbol, tile.resolution, {
-      onSnapshot: (resolvedInfo, bars, _noMore, label) => {
+      onSnapshot: (resolvedInfo, bars, noMore, label) => {
+        if (subGenRef.current !== gen) return;
         symbolRef.current = resolvedInfo;
         applyModeAndRender(ctrl, bars, resolvedInfo, 140);
-        onResolvedMeta?.(resolvedInfo, label);
+        ctrl.setNoMoreHistory(noMore);
+        onResolvedMeta?.(symbolRef.current, label);
       },
       onBarUpdate: (bar, quality) => {
+        if (subGenRef.current !== gen) return;
+        if (
+          !Number.isFinite(bar.time) ||
+          !Number.isFinite(bar.open) ||
+          !Number.isFinite(bar.high) ||
+          !Number.isFinite(bar.low) ||
+          !Number.isFinite(bar.close)
+        ) {
+          return;
+        }
         const rawList = rawBarsRef.current;
-        if (rawList.length > 0 && rawList[rawList.length - 1]!.time === bar.time) {
-          rawList[rawList.length - 1] = bar;
+        if (rawList.length > 0) {
+          const lastTime = rawList[rawList.length - 1]!.time;
+          // Strictly reject stale/out-of-order timestamps so chart NEVER appends duplicate backwards bars
+          if (bar.time < lastTime) return;
+          if (bar.time === lastTime) {
+            rawList[rawList.length - 1] = bar;
+          } else {
+            rawList.push(bar);
+          }
         } else {
           rawList.push(bar);
         }
@@ -582,10 +635,12 @@ export function ChartTile({
         if (chartMode === 'standard') {
           ctrl.upsertBar(bar);
           barsRef.current = rawList;
+          scheduleLiveIndicatorRecompute(ctrl);
         } else {
           const transformed = transformNonTimeBars(rawList, chartMode);
           barsRef.current = transformed;
-          ctrl.setBars(transformed, Math.min(160, Math.max(40, transformed.length)));
+          ctrl.updateBarsPreserveView(transformed);
+          scheduleLiveIndicatorRecompute(ctrl);
         }
         onLiveBarTick?.(symbolRef.current.id, bar);
 
@@ -594,21 +649,28 @@ export function ChartTile({
           onResolvedMeta?.(symbolRef.current, symbolRef.current.provider);
         }
       },
-      onHistoryResult: (olderBars) => {
-        if (olderBars.length > 0) {
-          rawBarsRef.current = [...olderBars, ...rawBarsRef.current];
+      onHistoryResult: (olderBars, noMore) => {
+        if (subGenRef.current !== gen) return;
+        const oldestTime = rawBarsRef.current[0]?.time ?? Infinity;
+        const freshOlder = olderBars.filter((b) => b.time < oldestTime);
+        if (freshOlder.length > 0) {
+          rawBarsRef.current = [...freshOlder, ...rawBarsRef.current];
           if (chartMode === 'standard') {
             barsRef.current = rawBarsRef.current;
-            ctrl.prependBars(olderBars);
+            ctrl.prependBars(freshOlder);
             recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
           } else {
             applyModeAndRender(ctrl, rawBarsRef.current, symbolRef.current, 160);
           }
         }
+        ctrl.setNoMoreHistory(noMore || freshOlder.length === 0);
       },
     });
 
-    return () => unsub();
+    return () => {
+      subGenRef.current++;
+      unsub();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tile.symbol, tile.resolution, bridgeOnlineMode, stress250k, reloadNonce, externalBarsOverride, replayActive, spreadAlignment]);
 

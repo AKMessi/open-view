@@ -11,6 +11,7 @@ import {
   findSymbolById,
   parseCsvBars,
   parseParquetBars,
+  registerDynamicSymbol,
 } from '@openview/datafeed-sdk';
 import {
   DrawingManager,
@@ -131,6 +132,8 @@ export function App() {
   const paperBrokerRef = useRef<PaperBrokerEngine>(new PaperBrokerEngine(100_000, 1));
   const activeControllerRef = useRef<ChartController | null>(null);
   const activeBarsRef = useRef<OHLCVBar[]>([]);
+  const latestActiveBarRef = useRef<OHLCVBar | null>(null);
+  const latestActiveBarDirtyRef = useRef(false);
   const [, setActiveBarsCount] = useState(0);
   const [latestActiveBar, setLatestActiveBar] = useState<OHLCVBar | null>(null);
   const [paperAccount, setPaperAccount] = useState<PaperAccountSnapshot>(() =>
@@ -141,6 +144,7 @@ export function App() {
   const [alertToast, setAlertToast] = useState<AlertTriggerEventClient | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quoteBufferRef = useRef<Record<string, QuoteTick>>({});
+  const needsLiveBarStateRef = useRef(false);
 
   if (!clientRef.current) {
     clientRef.current = new MarketClient();
@@ -202,6 +206,19 @@ export function App() {
 
   const activeTile = tiles.find((t) => t.id === activeTileId) ?? tiles[0]!;
   const layoutSpec = LAYOUTS.find((l) => l.id === layoutGrid) ?? LAYOUTS[0]!;
+  needsLiveBarStateRef.current =
+    bottomDrawer === 'options' ||
+    rightTab === 'trade' ||
+    rightTab === 'dom' ||
+    rightTab === 'alerts';
+
+  // Immediately sync latestActiveBar when user opens a panel that displays it
+  useEffect(() => {
+    if (needsLiveBarStateRef.current && latestActiveBarRef.current) {
+      setLatestActiveBar(latestActiveBarRef.current);
+      latestActiveBarDirtyRef.current = false;
+    }
+  }, [bottomDrawer, rightTab]);
 
   useEffect(() => {
     return paperBrokerRef.current.onChange(setPaperAccount);
@@ -290,6 +307,11 @@ export function App() {
       if (Object.keys(buffered).length > 0) {
         setQuotes((prev) => ({ ...prev, ...buffered }));
         quoteBufferRef.current = {};
+      }
+      // Flush live bar to React at most 4Hz AND only when a panel displaying latestActiveBar is open!
+      if (latestActiveBarDirtyRef.current && needsLiveBarStateRef.current && latestActiveBarRef.current) {
+        latestActiveBarDirtyRef.current = false;
+        setLatestActiveBar(latestActiveBarRef.current);
       }
     }, 250);
 
@@ -795,11 +817,17 @@ export function App() {
           >
             🔔
           </button>
-          <span
-            className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
+          <button
+            onClick={() => void clientRef.current?.reconnectNow()}
+            title={
+              bridge.mode === 'local_bridge'
+                ? 'Connected to Local OpenView Bridge (All 4 Markets Live)'
+                : 'Static Mode (Crypto Live only) — Auto-reconnecting to Bridge... Click to retry now'
+            }
+            className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition ${
               bridge.mode === 'local_bridge'
                 ? 'bg-[#089981]/15 text-[#089981]'
-                : 'bg-[#f7931a]/15 text-[#f7931a]'
+                : 'bg-[#f7931a]/15 text-[#f7931a] hover:bg-[#f7931a]/25'
             }`}
           >
             <span
@@ -808,7 +836,7 @@ export function App() {
               }`}
             />
             {bridge.mode === 'local_bridge' ? `${bridge.wsRttMs}ms` : 'STATIC'}
-          </span>
+          </button>
         </div>
       </header>
 
@@ -897,7 +925,10 @@ export function App() {
                   setMaximizedTileId((m) => (m === tile.id ? null : tile.id))
                 }
                 onLiveBarTick={(symId, bar) => {
-                  if (tile.id === activeTile.id) setLatestActiveBar(bar);
+                  if (tile.id === activeTile.id) {
+                    latestActiveBarRef.current = bar;
+                    latestActiveBarDirtyRef.current = true;
+                  }
                   paperBrokerRef.current.onBarUpdate(symId, bar);
                 }}
                 {...(tile.id === activeTile.id
@@ -907,7 +938,10 @@ export function App() {
                       onBarsLoaded: (bars) => {
                         activeBarsRef.current = bars;
                         setActiveBarsCount(bars.length);
-                        setLatestActiveBar(bars[bars.length - 1] ?? null);
+                        const tail = bars[bars.length - 1] ?? null;
+                        latestActiveBarRef.current = tail;
+                        latestActiveBarDirtyRef.current = false;
+                        setLatestActiveBar(tail);
                       },
                       onScriptOutput: (logs, ms, err) => {
                         setScriptLogs(logs);
@@ -1059,6 +1093,7 @@ export function App() {
         onToggleWatchlist={toggleWatchlistSymbol}
         onClose={() => setSearchOpen(false)}
         onSelect={(sym) => {
+          registerDynamicSymbol(sym);
           setLocalFileOverride(null);
           setStress250k(false);
           if (replaySnap.active) replayClockRef.current.stop();

@@ -1,5 +1,10 @@
 import { generateSyntheticBars } from '@openview/chart-engine';
-import { BinanceDirectDatafeed, findSymbolById, searchCatalog } from '@openview/datafeed-sdk';
+import {
+  BinanceDirectDatafeed,
+  findSymbolById,
+  registerDynamicSymbol,
+  searchCatalog,
+} from '@openview/datafeed-sdk';
 import type {
   FeedQualityBadge,
   MarketCategory,
@@ -110,11 +115,17 @@ export class MarketClient {
 
   private readonly stateListeners = new Set<(s: BridgeConnectionState) => void>();
   private readonly chartHandlers = new Map<string, ChartSubscriptionHandlers>();
+  private readonly chartSubSeq = new Map<string, number>();
+  private readonly activeChartSpecs = new Map<string, { symbolId: string; resolution: Resolution }>();
   private readonly directChartUnsubs = new Map<string, () => void>();
   private readonly quoteListeners = new Set<(q: QuoteTick) => void>();
   private readonly alertListeners = new Set<(ev: AlertTriggerEventClient) => void>();
   private directQuoteUnsub: (() => void) | null = null;
   private activeQuoteSymbols: string[] = [];
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelayMs = 2500;
+  private connectingBridge = false;
+  private disposed = false;
 
   get connectionState(): BridgeConnectionState {
     return this.state;
@@ -131,11 +142,36 @@ export class MarketClient {
     for (const fn of this.stateListeners) fn(next);
   }
 
-  async connect(): Promise<BridgeConnectionState> {
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleBridgeReconnect(): void {
+    if (this.disposed || this.reconnectTimer !== null || this.state.mode === 'local_bridge') return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.disposed || this.state.mode === 'local_bridge') return;
+      void this.tryConnectBridgeOnce().then((connected) => {
+        if (connected) {
+          this.reconnectDelayMs = 2500;
+        } else {
+          this.reconnectDelayMs = Math.min(8000, Math.round(this.reconnectDelayMs * 1.4));
+          this.scheduleBridgeReconnect();
+        }
+      });
+    }, this.reconnectDelayMs);
+  }
+
+  private async tryConnectBridgeOnce(): Promise<boolean> {
+    if (this.disposed || this.connectingBridge) return false;
+    this.connectingBridge = true;
     try {
       const healthRes = await fetch(`${BRIDGE_HTTP}/api/health`, {
         credentials: 'include',
-        signal: AbortSignal.timeout(1800),
+        signal: AbortSignal.timeout(2200),
       });
       if (!healthRes.ok) throw new Error('unhealthy');
       const health = (await healthRes.json()) as { vaultMode: string };
@@ -143,6 +179,7 @@ export class MarketClient {
       const sessRes = await fetch(`${BRIDGE_HTTP}/api/v1/auth/session`, {
         method: 'POST',
         credentials: 'include',
+        signal: AbortSignal.timeout(2200),
       });
       if (!sessRes.ok) throw new Error('session failed');
       const { token } = (await sessRes.json()) as { token: string };
@@ -152,13 +189,21 @@ export class MarketClient {
         method: 'POST',
         credentials: 'include',
         headers: { 'x-openview-token': token },
+        signal: AbortSignal.timeout(2200),
       });
       if (!ticketRes.ok) throw new Error('ticket failed');
       const { ticket } = (await ticketRes.json()) as { ticket: string };
 
       await new Promise<void>((resolve, reject) => {
         const socket = new WebSocket(`${BRIDGE_WS}?ticket=${encodeURIComponent(ticket)}`);
-        this.ws = socket;
+        let settled = false;
+        const failTimer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            socket.close();
+            reject(new Error('WS handshake timeout'));
+          }
+        }, 3000);
 
         socket.onopen = () => {
           socket.send(JSON.stringify({ type: 'ping', id: 1, ts: performance.now() }));
@@ -166,7 +211,17 @@ export class MarketClient {
 
         socket.onmessage = (ev) => {
           const msg = JSON.parse(String(ev.data)) as WsServerMessage;
-          if (msg.type === 'pong') {
+          if (msg.type === 'pong' && !settled) {
+            settled = true;
+            clearTimeout(failTimer);
+            // Tear down any static-mode fallback streams before switching to Bridge WS
+            for (const unsub of this.directChartUnsubs.values()) unsub();
+            this.directChartUnsubs.clear();
+            this.directQuoteUnsub?.();
+            this.directQuoteUnsub = null;
+
+            this.ws = socket;
+            this.clearReconnectTimer();
             this.setState({
               mode: 'local_bridge',
               vaultMode: health.vaultMode,
@@ -178,21 +233,67 @@ export class MarketClient {
           this.dispatchWsMessage(msg);
         };
 
-        socket.onerror = () => reject(new Error('WS failed'));
+        socket.onerror = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(failTimer);
+            reject(new Error('WS failed'));
+          }
+        };
         socket.onclose = () => {
-          if (this.state.mode === 'local_bridge') {
-            this.setState({ mode: 'static_mode' });
+          if (!settled) {
+            settled = true;
+            clearTimeout(failTimer);
+            reject(new Error('WS closed before pong'));
+            return;
+          }
+          if (this.ws === socket) {
+            this.ws = null;
+            this.token = null;
+            if (!this.disposed && this.state.mode === 'local_bridge') {
+              this.setState({ mode: 'static_mode' });
+              this.reconnectDelayMs = 2000;
+              this.scheduleBridgeReconnect();
+            }
           }
         };
       });
 
-      return this.state;
+      return true;
     } catch {
-      this.ws = null;
-      this.token = null;
-      this.setState({ mode: 'static_mode' });
+      return false;
+    } finally {
+      this.connectingBridge = false;
+    }
+  }
+
+  async connect(): Promise<BridgeConnectionState> {
+    // Allow up to ~3s across 4 rapid attempts on cold boot (Windows DPAPI vault unseal takes ~1-2s!)
+    const retryDelays = [0, 500, 900, 1200];
+    for (const delay of retryDelays) {
+      if (this.disposed) return this.state;
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      if (await this.tryConnectBridgeOnce()) {
+        return this.state;
+      }
+    }
+    this.ws = null;
+    this.token = null;
+    this.setState({ mode: 'static_mode' });
+    this.scheduleBridgeReconnect();
+    return this.state;
+  }
+
+  async reconnectNow(): Promise<BridgeConnectionState> {
+    this.clearReconnectTimer();
+    this.reconnectDelayMs = 2500;
+    if (await this.tryConnectBridgeOnce()) {
       return this.state;
     }
+    if (this.state.mode !== 'local_bridge') {
+      this.scheduleBridgeReconnect();
+    }
+    return this.state;
   }
 
   private dispatchWsMessage(msg: WsServerMessage): void {
@@ -240,7 +341,10 @@ export class MarketClient {
     handlers: ChartSubscriptionHandlers,
   ): () => void {
     this.unsubscribeChart(sessionId);
+    const seq = (this.chartSubSeq.get(sessionId) ?? 0) + 1;
+    this.chartSubSeq.set(sessionId, seq);
     this.chartHandlers.set(sessionId, handlers);
+    this.activeChartSpecs.set(sessionId, { symbolId, resolution });
 
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
@@ -251,7 +355,11 @@ export class MarketClient {
           resolution,
         }),
       );
-      return () => this.unsubscribeChart(sessionId);
+      return () => {
+        if (this.chartSubSeq.get(sessionId) === seq) {
+          this.unsubscribeChart(sessionId);
+        }
+      };
     }
 
     // Static Mode fallback: direct public Crypto WS, or honest fallback for Bridge-only markets
@@ -266,22 +374,30 @@ export class MarketClient {
       void this.cryptoDirect
         .getBars({ symbol: sym, resolution, countBack: 500 })
         .then((res) => {
-          if (!this.chartHandlers.has(sessionId)) return;
+          // CRITICAL: Guard against async race when user switched symbol/TF before getBars resolved!
+          if (this.chartSubSeq.get(sessionId) !== seq) return;
           if (res.bars.length > 0) {
             handlers.onSnapshot({ ...sym, feedQuality: res.feedQuality }, res.bars, false, res.providerLabel);
           } else {
             const fallback = generateSyntheticBars(sym, resolution, 400);
             handlers.onSnapshot({ ...sym, feedQuality: 'delayed_eod' }, fallback, true, 'Static Offline Demo');
           }
+          // Ensure any prior direct socket is closed before opening a new one
+          this.directChartUnsubs.get(sessionId)?.();
           const unsub = this.cryptoDirect.subscribeBars(sym, resolution, (bar, q) => {
+            if (this.chartSubSeq.get(sessionId) !== seq) return;
             handlers.onBarUpdate(bar, q);
           });
+          if (this.chartSubSeq.get(sessionId) !== seq) {
+            unsub();
+            return;
+          }
           this.directChartUnsubs.set(sessionId, unsub);
         });
     } else {
       const demo = generateSyntheticBars(sym, resolution, 400, sym.id.length * 19);
       queueMicrotask(() => {
-        if (!this.chartHandlers.has(sessionId)) return;
+        if (this.chartSubSeq.get(sessionId) !== seq) return;
         handlers.onSnapshot(
           { ...sym, feedQuality: 'delayed_eod' },
           demo,
@@ -291,10 +407,15 @@ export class MarketClient {
       });
     }
 
-    return () => this.unsubscribeChart(sessionId);
+    return () => {
+      if (this.chartSubSeq.get(sessionId) === seq) {
+        this.unsubscribeChart(sessionId);
+      }
+    };
   }
 
   requestMoreHistory(sessionId: string, beforeTime: number, count = 400): void {
+    const seq = this.chartSubSeq.get(sessionId);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
@@ -305,11 +426,37 @@ export class MarketClient {
           count,
         }),
       );
+      return;
+    }
+
+    // Static Mode direct Crypto left-scroll history pagination
+    const spec = this.activeChartSpecs.get(sessionId);
+    const handler = this.chartHandlers.get(sessionId);
+    if (!spec || !handler) return;
+    const sym = findSymbolById(spec.symbolId);
+    if (
+      sym &&
+      (sym.market === 'crypto' || sym.id.startsWith('BINANCE:') || sym.id.startsWith('HYPERLIQUID:'))
+    ) {
+      void this.cryptoDirect
+        .getBars({ symbol: sym, resolution: spec.resolution, countBack: count, to: beforeTime - 1 })
+        .then((res) => {
+          if (this.chartSubSeq.get(sessionId) !== seq) return;
+          handler.onHistoryResult?.(res.bars, res.bars.length < 10);
+        })
+        .catch(() => {
+          if (this.chartSubSeq.get(sessionId) !== seq) return;
+          handler.onHistoryResult?.([], true);
+        });
+    } else {
+      handler.onHistoryResult?.([], true);
     }
   }
 
   unsubscribeChart(sessionId: string): void {
+    this.chartSubSeq.set(sessionId, (this.chartSubSeq.get(sessionId) ?? 0) + 1);
     this.chartHandlers.delete(sessionId);
+    this.activeChartSpecs.delete(sessionId);
     this.directChartUnsubs.get(sessionId)?.();
     this.directChartUnsubs.delete(sessionId);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -363,6 +510,7 @@ export class MarketClient {
             symbols: SymbolInfo[];
             stats?: { totalCached: number };
           };
+          for (const sym of data.symbols) registerDynamicSymbol(sym);
           return {
             symbols: data.symbols,
             ...(data.stats ? { totalCached: data.stats.totalCached } : {}),
@@ -545,8 +693,12 @@ export class MarketClient {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.clearReconnectTimer();
     for (const id of [...this.chartHandlers.keys()]) this.unsubscribeChart(id);
     this.directQuoteUnsub?.();
+    this.directQuoteUnsub = null;
     this.ws?.close();
+    this.ws = null;
   }
 }

@@ -12,6 +12,7 @@ import type { DbWorkerClient } from '../workers/db-client.ts';
 import {
   fetchYahooIntradayBars,
   fetchYahooLatestQuote,
+  getCachedQuote,
   subscribeAlpacaLiveWs,
   subscribeFinnhubLiveWs,
   subscribePolledLiveBar,
@@ -577,7 +578,7 @@ export class MarketDataRouter {
       innerUnsub = subscribePolledLiveBar(
         sym,
         resolution,
-        4000,
+        10_000,
         fallbackQuality,
         async () => {
           const q = await fetchYahooLatestQuote(sym);
@@ -610,6 +611,12 @@ export class MarketDataRouter {
 
     if (otherSyms.length === 0) return unsubCrypto;
 
+    // Immediately push any warm cached quotes in 0ms so Watchlist prices never flicker to "—"
+    for (const sym of otherSyms) {
+      const warm = getCachedQuote(sym.id);
+      if (warm) onQuote(warm);
+    }
+
     let stopped = false;
     let inFlight = false;
 
@@ -617,8 +624,8 @@ export class MarketDataRouter {
       if (stopped || inFlight) return;
       inFlight = true;
       try {
-        // Fetch live public quotes in small parallel waves so all 4 markets populate immediately
-        const batchSize = 5;
+        // Fetch live public quotes in small parallel waves (4 concurrent) so all 4 markets stay fresh without 429 limits
+        const batchSize = 4;
         for (let i = 0; i < otherSyms.length; i += batchSize) {
           if (stopped) break;
           const batch = otherSyms.slice(i, i + batchSize);
@@ -635,7 +642,7 @@ export class MarketDataRouter {
     };
 
     void pollQuotes();
-    const timer = setInterval(() => void pollQuotes(), 6000);
+    const timer = setInterval(() => void pollQuotes(), 12_000);
 
     return () => {
       stopped = true;

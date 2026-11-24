@@ -99,5 +99,5 @@ const viteBin = resolveViteBin();
 console.log(
   `[dev] Starting OpenView Bridge (http://127.0.0.1:${bridgePort}) + Web Workbench (http://127.0.0.1:${webPort})...`,
 );
-launch('server', ['--watch', SERVER_ENTRY], ROOT, sharedEnv);
+launch('server', ['--watch-path', path.join(ROOT, 'apps', 'server', 'src'), SERVER_ENTRY], ROOT, sharedEnv);
 launch('web', [viteBin, '--host', '127.0.0.1', '--port', String(webPort)], WEB_DIR, sharedEnv);

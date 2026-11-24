@@ -30,6 +30,8 @@ const WEEKDAY_MAP: Record<string, number> = {
 };
 
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
+const localPartsCache = new Map<string, LocalDateTimeParts>();
+const MAX_LOCAL_PARTS_CACHE = 8192;
 
 function getFormatter(timezone: string): Intl.DateTimeFormat {
   let fmt = formatterCache.get(timezone);
@@ -50,15 +52,45 @@ function getFormatter(timezone: string): Intl.DateTimeFormat {
   return fmt;
 }
 
+function buildFixedOffsetParts(epochMs: number, offsetMinutes: number): LocalDateTimeParts {
+  const d = new Date(epochMs + offsetMinutes * 60_000);
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  const weekday = d.getUTCDay();
+  const hour = d.getUTCHours();
+  const minute = d.getUTCMinutes();
+  const second = d.getUTCSeconds();
+  const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  return { year, month, day, weekday, hour, minute, second, isoDate, offsetMinutes };
+}
+
 export function getLocalParts(epochMs: number, timezone: string): LocalDateTimeParts {
-  const parts = getFormatter(timezone).formatToParts(new Date(epochMs));
+  // Zero-Intl O(1) fast paths for UTC (Crypto) and Asia/Kolkata (India NSE/BSE/MCX, fixed UTC+5:30, no DST)
+  if (timezone === 'UTC' || timezone === 'Etc/UTC') {
+    return buildFixedOffsetParts(epochMs, 0);
+  }
+  if (timezone === 'Asia/Kolkata' || timezone === 'Asia/Calcutta') {
+    return buildFixedOffsetParts(epochMs, 330);
+  }
+
+  // Minute-bucketed memoization for DST timezones (America/New_York, etc.)
+  // Eliminates 1,000+ Intl.DateTimeFormat.formatToParts calls per pan/zoom frame!
+  const minuteBucket = Math.floor(epochMs / 60_000);
+  const second = Math.floor(((epochMs % 60_000) + 60_000) % 60_000 / 1000);
+  const cacheKey = `${timezone}:${minuteBucket}`;
+  const cached = localPartsCache.get(cacheKey);
+  if (cached) {
+    return cached.second === second ? cached : { ...cached, second };
+  }
+
+  const parts = getFormatter(timezone).formatToParts(new Date(minuteBucket * 60_000));
   let year = 1970;
   let month = 1;
   let day = 1;
   let weekday = 0;
   let hour = 0;
   let minute = 0;
-  let second = 0;
 
   for (const p of parts) {
     switch (p.type) {
@@ -80,19 +112,29 @@ export function getLocalParts(epochMs: number, timezone: string): LocalDateTimeP
       case 'minute':
         minute = Number(p.value);
         break;
-      case 'second':
-        second = Number(p.value);
-        break;
     }
   }
 
-  const asUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
-  // Strip sub-second jitter before computing exact timezone offset in minutes
-  const truncatedMs = Math.floor(epochMs / 1000) * 1000;
-  const offsetMinutes = Math.round((asUtcMs - truncatedMs) / 60_000);
-
+  const asUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const offsetMinutes = Math.round((asUtcMs - minuteBucket * 60_000) / 60_000);
   const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  return { year, month, day, weekday, hour, minute, second, isoDate, offsetMinutes };
+  const baseResult: LocalDateTimeParts = {
+    year,
+    month,
+    day,
+    weekday,
+    hour,
+    minute,
+    second: 0,
+    isoDate,
+    offsetMinutes,
+  };
+
+  if (localPartsCache.size >= MAX_LOCAL_PARTS_CACHE) {
+    localPartsCache.clear();
+  }
+  localPartsCache.set(cacheKey, baseResult);
+  return second === 0 ? baseResult : { ...baseResult, second };
 }
 
 /**
@@ -348,11 +390,30 @@ export class SessionCalendar {
     prevBarMs: number,
     currBarMs: number,
     calendarId: ExchangeCalendarId,
-    extendedHours = false,
+    _extendedHours = false,
   ): boolean {
-    const prevWin = this.getSessionWindow(prevBarMs, calendarId, extendedHours);
-    const currWin = this.getSessionWindow(currBarMs, calendarId, extendedHours);
-    return prevWin.sessionDate !== currWin.sessionDate;
+    if (calendarId === 'CRYPTO') {
+      return Math.floor(prevBarMs / 86_400_000) !== Math.floor(currBarMs / 86_400_000);
+    }
+    if (calendarId === 'NSE' || calendarId === 'MCX') {
+      // Fixed UTC+5:30 day boundary comparison (zero Intl calls!)
+      return (
+        Math.floor((prevBarMs + 19_800_000) / 86_400_000) !==
+        Math.floor((currBarMs + 19_800_000) / 86_400_000)
+      );
+    }
+    if (calendarId === 'US_EQUITY') {
+      return (
+        getLocalParts(prevBarMs, 'America/New_York').isoDate !==
+        getLocalParts(currBarMs, 'America/New_York').isoDate
+      );
+    }
+    // FOREX_OTC: 17:00 America/New_York rollover boundary
+    const p1 = getLocalParts(prevBarMs, 'America/New_York');
+    const p2 = getLocalParts(currBarMs, 'America/New_York');
+    const d1 = p1.hour >= 17 ? p1.day + 1 : p1.day;
+    const d2 = p2.hour >= 17 ? p2.day + 1 : p2.day;
+    return p1.year !== p2.year || p1.month !== p2.month || d1 !== d2;
   }
 
   isSpecialSession(isoDate: string, calendarId: ExchangeCalendarId): SpecialSessionOverride | null {

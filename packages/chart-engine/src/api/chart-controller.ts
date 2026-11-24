@@ -97,6 +97,7 @@ export class ChartController {
   private crosshairListeners = new Set<(state: CrosshairState) => void>();
   private loadMoreListeners = new Set<(beforeTime: number) => void>();
   private loadMorePending = false;
+  private noMoreHistory = false;
   private onBaseOverlay: ((ctx: CanvasRenderingContext2D) => void) | undefined;
   private onTopOverlay: ((ctx: CanvasRenderingContext2D) => void) | undefined;
   private pointerInterceptor: {
@@ -236,6 +237,7 @@ export class ChartController {
   setBars(bars: readonly OHLCVBar[], fitLastBars = 140): void {
     this.plotList.setBars(bars);
     this.loadMorePending = false;
+    this.noMoreHistory = false;
     if (this.plotList.length > 0) {
       const last = this.plotList.lastIndex();
       this.timeScale.setBaseIndex(last);
@@ -246,6 +248,32 @@ export class ChartController {
     this.scheduler.invalidate(DirtyFlag.FULL | DirtyFlag.CURSOR);
   }
 
+  /**
+   * Replaces bars without resetting user zoom/pan (for live updates on non-time charts like Renko/Range).
+   */
+  updateBarsPreserveView(bars: readonly OHLCVBar[]): void {
+    const prevLast = this.plotList.lastIndex();
+    this.plotList.setBars(bars);
+    if (this.plotList.length > 0) {
+      const nextLast = this.plotList.lastIndex();
+      const delta = nextLast - prevLast;
+      this.timeScale.setBaseIndex(nextLast);
+      if (delta !== 0 && prevLast >= 0) {
+        this.timeScale.setRightOffset(this.timeScale.rightOffset - delta);
+      }
+    }
+    this.scheduler.invalidate(DirtyFlag.FULL | DirtyFlag.CURSOR);
+  }
+
+  setNoMoreHistory(noMore: boolean): void {
+    this.noMoreHistory = noMore;
+    this.loadMorePending = false;
+  }
+
+  getFirstBarIndex(): number {
+    return this.plotList.firstIndex();
+  }
+
   prependBars(olderBars: readonly OHLCVBar[]): void {
     this.plotList.prependBars(olderBars);
     this.loadMorePending = false;
@@ -253,7 +281,8 @@ export class ChartController {
   }
 
   upsertBar(bar: OHLCVBar, allowDuplicateTimestamp = false): void {
-    const { appended, barIndex } = this.plotList.upsertBar(bar, allowDuplicateTimestamp);
+    const { appended, barIndex, rejected } = this.plotList.upsertBar(bar, allowDuplicateTimestamp);
+    if (rejected) return;
     if (appended) {
       this.timeScale.setBaseIndex(barIndex);
     }
@@ -447,7 +476,14 @@ export class ChartController {
   }
 
   private checkLoadMoreHistory(): void {
-    if (this.loadMorePending || this.plotList.length === 0 || this.loadMoreListeners.size === 0) return;
+    if (
+      this.loadMorePending ||
+      this.noMoreHistory ||
+      this.plotList.length === 0 ||
+      this.loadMoreListeners.size === 0
+    ) {
+      return;
+    }
     const vis = this.timeScale.getVisibleLogicalRange(this.plotList.firstIndex(), this.plotList.lastIndex());
     if (vis.rawFrom <= this.plotList.firstIndex() + 25) {
       const oldest = this.plotList.getBar(this.plotList.firstIndex());

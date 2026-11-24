@@ -508,6 +508,7 @@ export async function createBridgeServer(
   wss.on('connection', (ws: WebSocket) => {
     const chartUnsubs = new Map<string, () => void>();
     const chartMeta = new Map<string, { symbol: string; resolution: Resolution }>();
+    const chartSubSeq = new Map<string, number>();
     let quoteUnsub: (() => void) | null = null;
 
     sendWs(ws, {
@@ -518,8 +519,13 @@ export async function createBridgeServer(
     });
 
     ws.on('close', () => {
+      // Bump every session generation so any in-flight async getHistory() drops cleanly on close
+      for (const sid of chartSubSeq.keys()) {
+        chartSubSeq.set(sid, (chartSubSeq.get(sid) ?? 0) + 1);
+      }
       for (const unsub of chartUnsubs.values()) unsub();
       chartUnsubs.clear();
+      chartMeta.clear();
       quoteUnsub?.();
       quoteUnsub = null;
     });
@@ -542,6 +548,8 @@ export async function createBridgeServer(
       }
 
       if (msg.type === 'chart.subscribe') {
+        const seq = (chartSubSeq.get(msg.sessionId) ?? 0) + 1;
+        chartSubSeq.set(msg.sessionId, seq);
         chartUnsubs.get(msg.sessionId)?.();
         chartUnsubs.delete(msg.sessionId);
         chartMeta.set(msg.sessionId, { symbol: msg.symbol, resolution: msg.resolution });
@@ -549,7 +557,8 @@ export async function createBridgeServer(
         void router
           .getHistory(msg.symbol, msg.resolution, 500)
           .then((res) => {
-            if (ws.readyState !== ws.OPEN) return;
+            // CRITICAL: Abort stale async history load if user switched symbol/TF or closed WS!
+            if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) return;
             sendWs(ws, {
               type: 'chart.snapshot',
               sessionId: msg.sessionId,
@@ -558,7 +567,10 @@ export async function createBridgeServer(
               bars: res.bars,
               noMoreHistory: res.noMoreHistory,
             });
+            // Close any residual unsub before registering new live stream
+            chartUnsubs.get(msg.sessionId)?.();
             const unsub = router.subscribeLiveBars(msg.symbol, msg.resolution, (bar, quality) => {
+              if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) return;
               void alerts.evaluateBar(msg.symbol, bar);
               sendWs(ws, {
                 type: 'chart.bar_update',
@@ -567,9 +579,14 @@ export async function createBridgeServer(
                 feedQuality: quality,
               });
             });
+            if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) {
+              unsub();
+              return;
+            }
             chartUnsubs.set(msg.sessionId, unsub);
           })
           .catch((err: unknown) => {
+            if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) return;
             sendWs(ws, {
               type: 'error',
               code: 'history_failed',
@@ -581,6 +598,7 @@ export async function createBridgeServer(
       }
 
       if (msg.type === 'chart.unsubscribe') {
+        chartSubSeq.set(msg.sessionId, (chartSubSeq.get(msg.sessionId) ?? 0) + 1);
         chartUnsubs.get(msg.sessionId)?.();
         chartUnsubs.delete(msg.sessionId);
         chartMeta.delete(msg.sessionId);
@@ -589,10 +607,12 @@ export async function createBridgeServer(
 
       if (msg.type === 'chart.history') {
         const meta = chartMeta.get(msg.sessionId);
+        const seq = chartSubSeq.get(msg.sessionId) ?? 0;
         if (!meta) return;
         void router
           .getHistory(meta.symbol, meta.resolution, msg.count, msg.beforeTime)
           .then((res) => {
+            if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) return;
             sendWs(ws, {
               type: 'chart.history_result',
               requestId: msg.requestId,
@@ -602,6 +622,7 @@ export async function createBridgeServer(
             });
           })
           .catch(() => {
+            if (ws.readyState !== ws.OPEN || chartSubSeq.get(msg.sessionId) !== seq) return;
             sendWs(ws, {
               type: 'chart.history_result',
               requestId: msg.requestId,
