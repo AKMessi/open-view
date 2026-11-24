@@ -107,6 +107,33 @@ export class DbWorkerClient {
     return this.call({ op: 'workspace.list' });
   }
 
+  putBarsBatch(
+    symbol: string,
+    resolution: string,
+    bars: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>,
+  ): Promise<{ ok: boolean; count: number }> {
+    return this.call({ op: 'bars.putBatch', symbol, resolution, bars });
+  }
+
+  getCachedBars(
+    symbol: string,
+    resolution: string,
+    limit: number,
+    beforeTime?: number,
+  ): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>> {
+    return this.call({
+      op: 'bars.getRange',
+      symbol,
+      resolution,
+      limit,
+      ...(beforeTime !== undefined ? { beforeTime } : {}),
+    });
+  }
+
+  invalidateCachedBars(symbol: string): Promise<{ ok: boolean }> {
+    return this.call({ op: 'bars.invalidate', symbol });
+  }
+
   async close(): Promise<void> {
     await this.worker.terminate();
   }

@@ -20,7 +20,23 @@ type WorkerRequest =
   | { id: number; op: 'vault.delete'; provider: string }
   | { id: number; op: 'workspace.save'; workspaceId: string; name: string; revision: number; snapshotJson: string; updatedAt: number }
   | { id: number; op: 'workspace.load'; workspaceId: string }
-  | { id: number; op: 'workspace.list' };
+  | { id: number; op: 'workspace.list' }
+  | {
+      id: number;
+      op: 'bars.putBatch';
+      symbol: string;
+      resolution: string;
+      bars: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>;
+    }
+  | {
+      id: number;
+      op: 'bars.getRange';
+      symbol: string;
+      resolution: string;
+      beforeTime?: number;
+      limit: number;
+    }
+  | { id: number; op: 'bars.invalidate'; symbol: string };
 
 const init = workerData as WorkerInitData;
 if (init.dbPath !== ':memory:') {
@@ -90,6 +106,17 @@ const stmtWsSave = db.prepare(
 const stmtWsLoad = db.prepare('SELECT id, name, revision, snapshot_json, updated_at FROM workspaces WHERE id = ?');
 const stmtWsList = db.prepare('SELECT id, name, revision, updated_at FROM workspaces ORDER BY updated_at DESC');
 
+const stmtBarUpsert = db.prepare(
+  'INSERT INTO bars_cache (symbol, resolution, bar_time, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol, resolution, bar_time) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume',
+);
+const stmtBarsLatest = db.prepare(
+  'SELECT bar_time AS time, open, high, low, close, volume FROM bars_cache WHERE symbol = ? AND resolution = ? ORDER BY bar_time DESC LIMIT ?',
+);
+const stmtBarsBefore = db.prepare(
+  'SELECT bar_time AS time, open, high, low, close, volume FROM bars_cache WHERE symbol = ? AND resolution = ? AND bar_time < ? ORDER BY bar_time DESC LIMIT ?',
+);
+const stmtBarsInvalidate = db.prepare('DELETE FROM bars_cache WHERE symbol = ?');
+
 const port = parentPort;
 
 port.on('message', (req: WorkerRequest) => {
@@ -134,6 +161,32 @@ port.on('message', (req: WorkerRequest) => {
         break;
       case 'workspace.list':
         result = stmtWsList.all();
+        break;
+      case 'bars.putBatch':
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const b of req.bars) {
+            stmtBarUpsert.run(req.symbol, req.resolution, b.time, b.open, b.high, b.low, b.close, b.volume);
+          }
+          db.exec('COMMIT');
+        } catch (e) {
+          db.exec('ROLLBACK');
+          throw e;
+        }
+        result = { ok: true, count: req.bars.length };
+        break;
+      case 'bars.getRange': {
+        const rows =
+          req.beforeTime !== undefined
+            ? stmtBarsBefore.all(req.symbol, req.resolution, req.beforeTime, req.limit)
+            : stmtBarsLatest.all(req.symbol, req.resolution, req.limit);
+        rows.reverse();
+        result = rows;
+        break;
+      }
+      case 'bars.invalidate':
+        stmtBarsInvalidate.run(req.symbol);
+        result = { ok: true };
         break;
     }
     port.postMessage({ id: req.id, ok: true, result });

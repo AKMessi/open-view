@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@openview/protocol': path.join(rootDir, 'packages/protocol/src/index.ts'),
+      '@openview/chart-engine/model': path.join(rootDir, 'packages/chart-engine/src/model/index.ts'),
       '@openview/chart-engine': path.join(rootDir, 'packages/chart-engine/src/index.ts'),
       '@openview/script-runtime': path.join(rootDir, 'packages/script-runtime/src/index.ts'),
       '@openview/datafeed-sdk': path.join(rootDir, 'packages/datafeed-sdk/src/index.ts'),

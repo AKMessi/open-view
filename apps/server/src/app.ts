@@ -4,7 +4,14 @@ import type { Duplex } from 'node:stream';
 import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { parseWsClientMessage, type WsServerMessage } from '@openview/protocol';
+import { searchCatalog } from '@openview/datafeed-sdk';
+import {
+  parseWsClientMessage,
+  type MarketCategory,
+  type Resolution,
+  type WsServerMessage,
+} from '@openview/protocol';
+import { MarketDataRouter, SUPPORTED_PROVIDERS, type ProviderId } from './providers/market-router.ts';
 import {
   CSRF_HEADER_NAME,
   createDefaultSecurityPolicy,
@@ -37,11 +44,14 @@ export interface RunningBridgeServer {
   wss: WebSocketServer;
   db: DbWorkerClient;
   vault: CredentialVault;
+  router: MarketDataRouter;
   sessionGuard: SessionGuard;
   url: string;
   wsUrl: string;
   close: () => Promise<void>;
 }
+
+const VALID_PROVIDER_IDS = new Set<string>(SUPPORTED_PROVIDERS.map((p) => p.id));
 
 function defaultSealer(): IMasterKeySealer {
   if (process.platform === 'win32' && !process.env.OPENVIEW_VAULT_PASSPHRASE) {
@@ -91,6 +101,7 @@ export async function createBridgeServer(
 
   const db = new DbWorkerClient(dbPath);
   await db.ping();
+  const router = new MarketDataRouter(db, vault);
 
   const app = Fastify({
     logger: false,
@@ -127,7 +138,7 @@ export async function createBridgeServer(
     return {
       ok: true,
       service: 'openview-bridge',
-      version: '0.1.0',
+      version: '0.2.0',
       bridgeMode,
       vaultMode: vault.mode,
       vaultUnlocked: vault.isUnlocked(),
@@ -138,7 +149,6 @@ export async function createBridgeServer(
   });
 
   app.post('/api/v1/auth/session', async (request, reply) => {
-    // Only allow session bootstrap from allowlisted browser origins or direct local requests
     const originCheck = validateOriginHeader(request.headers.origin, policy, false);
     if (!originCheck.ok) {
       return reply.code(403).send({ error: 'forbidden_origin', message: originCheck.reason });
@@ -160,22 +170,129 @@ export async function createBridgeServer(
     return { ok: true, ticket, expiresAt };
   });
 
+  // Symbol search across all 4 markets
+  app.get('/api/v1/symbols/search', async (request) => {
+    const q = request.query as { q?: string; market?: string; limit?: string };
+    const market = (q.market ?? 'all') as MarketCategory | 'all';
+    const limit = Math.min(100, Math.max(1, Number(q.limit ?? 40)));
+    return { ok: true, symbols: searchCatalog(q.q ?? '', market, limit) };
+  });
+
+  // Historical OHLCV endpoint
+  app.get('/api/v1/history', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const q = request.query as { symbol?: string; resolution?: string; count?: string; beforeTime?: string };
+    if (!q.symbol) {
+      return reply.code(400).send({ error: 'missing_symbol' });
+    }
+    const resolution = (q.resolution ?? '15') as Resolution;
+    const count = Math.min(2000, Math.max(10, Number(q.count ?? 300)));
+    const beforeTime = q.beforeTime ? Number(q.beforeTime) : undefined;
+    const result = await router.getHistory(q.symbol, resolution, count, beforeTime);
+    return { ok: true, ...result };
+  });
+
+  // Encrypted Provider Vault CRUD (never returns raw secrets back to browser!)
   app.get('/api/v1/vault/providers', async (request, reply) => {
     if (!sessionGuard.verifyHttpAuth(request.headers)) {
       return reply.code(401).send({ error: 'unauthorized', message: 'Valid session required' });
     }
-    const providers = await db.listVaultProviders();
-    return { ok: true, vaultMode: vault.mode, providers };
+    const saved = await db.listVaultProviders();
+    const savedMap = new Map(saved.map((r) => [r.provider, r.updated_at]));
+    return {
+      ok: true,
+      vaultMode: vault.mode,
+      providers: SUPPORTED_PROVIDERS.map((p) => ({
+        ...p,
+        configured: savedMap.has(p.id),
+        updatedAt: savedMap.get(p.id) ?? null,
+      })),
+    };
+  });
+
+  app.put('/api/v1/vault/providers/:provider', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { provider } = request.params as { provider: string };
+    if (!VALID_PROVIDER_IDS.has(provider)) {
+      return reply.code(400).send({ error: 'unknown_provider' });
+    }
+    const body = request.body as Record<string, string> | null;
+    if (!body || typeof body !== 'object') {
+      return reply.code(400).send({ error: 'invalid_credentials_payload' });
+    }
+    const sealed = vault.encryptSecret(provider as ProviderId, JSON.stringify(body));
+    await db.putVaultSecret(provider, JSON.stringify(sealed));
+    return { ok: true, provider, configured: true, updatedAt: Date.now() };
+  });
+
+  app.delete('/api/v1/vault/providers/:provider', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { provider } = request.params as { provider: string };
+    await db.deleteVaultSecret(provider);
+    return { ok: true, provider, configured: false };
+  });
+
+  // Workspace Persistence CRUD (off-main-thread SQLite WAL)
+  app.get('/api/v1/workspaces', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    return { ok: true, workspaces: await db.listWorkspaces() };
+  });
+
+  app.get('/api/v1/workspaces/:id', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { id } = request.params as { id: string };
+    const ws = await db.loadWorkspace(id);
+    if (!ws) return reply.code(404).send({ error: 'not_found' });
+    return { ok: true, workspace: JSON.parse(ws.snapshot_json) };
+  });
+
+  app.put('/api/v1/workspaces/:id', async (request, reply) => {
+    if (!sessionGuard.verifyHttpAuth(request.headers)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { id } = request.params as { id: string };
+    const body = request.body as { name?: string; revision?: number } | null;
+    if (!body || typeof body !== 'object') {
+      return reply.code(400).send({ error: 'invalid_workspace' });
+    }
+    await db.saveWorkspace(
+      id,
+      body.name ?? 'Default Workspace',
+      Number(body.revision ?? 1),
+      JSON.stringify(body),
+    );
+    return { ok: true, id };
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   wss.on('connection', (ws: WebSocket) => {
+    const chartUnsubs = new Map<string, () => void>();
+    const chartMeta = new Map<string, { symbol: string; resolution: Resolution }>();
+    let quoteUnsub: (() => void) | null = null;
+
     sendWs(ws, {
       type: 'hello',
-      serverVersion: '0.1.0',
+      serverVersion: '0.2.0',
       bridgeMode,
       serverTs: Date.now(),
+    });
+
+    ws.on('close', () => {
+      for (const unsub of chartUnsubs.values()) unsub();
+      chartUnsubs.clear();
+      quoteUnsub?.();
+      quoteUnsub = null;
     });
 
     ws.on('message', (rawBuf) => {
@@ -184,6 +301,7 @@ export async function createBridgeServer(
         sendWs(ws, { type: 'error', code: 'invalid_frame', message: 'Malformed WS message' });
         return;
       }
+
       if (msg.type === 'ping') {
         sendWs(ws, {
           type: 'pong',
@@ -193,11 +311,90 @@ export async function createBridgeServer(
         });
         return;
       }
-      sendWs(ws, {
-        type: 'error',
-        code: 'not_implemented_phase0',
-        message: `Operation ${msg.type} will be enabled in Phase 2`,
-      });
+
+      if (msg.type === 'chart.subscribe') {
+        chartUnsubs.get(msg.sessionId)?.();
+        chartUnsubs.delete(msg.sessionId);
+        chartMeta.set(msg.sessionId, { symbol: msg.symbol, resolution: msg.resolution });
+
+        void router
+          .getHistory(msg.symbol, msg.resolution, 500)
+          .then((res) => {
+            if (ws.readyState !== ws.OPEN) return;
+            sendWs(ws, {
+              type: 'chart.snapshot',
+              sessionId: msg.sessionId,
+              symbolInfo: res.symbolInfo,
+              resolution: msg.resolution,
+              bars: res.bars,
+              noMoreHistory: res.noMoreHistory,
+            });
+            const unsub = router.subscribeLiveBars(msg.symbol, msg.resolution, (bar, quality) => {
+              sendWs(ws, {
+                type: 'chart.bar_update',
+                sessionId: msg.sessionId,
+                bar,
+                feedQuality: quality,
+              });
+            });
+            chartUnsubs.set(msg.sessionId, unsub);
+          })
+          .catch((err: unknown) => {
+            sendWs(ws, {
+              type: 'error',
+              code: 'history_failed',
+              sessionId: msg.sessionId,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        return;
+      }
+
+      if (msg.type === 'chart.unsubscribe') {
+        chartUnsubs.get(msg.sessionId)?.();
+        chartUnsubs.delete(msg.sessionId);
+        chartMeta.delete(msg.sessionId);
+        return;
+      }
+
+      if (msg.type === 'chart.history') {
+        const meta = chartMeta.get(msg.sessionId);
+        if (!meta) return;
+        void router
+          .getHistory(meta.symbol, meta.resolution, msg.count, msg.beforeTime)
+          .then((res) => {
+            sendWs(ws, {
+              type: 'chart.history_result',
+              requestId: msg.requestId,
+              sessionId: msg.sessionId,
+              bars: res.bars,
+              noMoreHistory: res.noMoreHistory,
+            });
+          })
+          .catch(() => {
+            sendWs(ws, {
+              type: 'chart.history_result',
+              requestId: msg.requestId,
+              sessionId: msg.sessionId,
+              bars: [],
+              noMoreHistory: true,
+            });
+          });
+        return;
+      }
+
+      if (msg.type === 'quote.subscribe') {
+        quoteUnsub?.();
+        quoteUnsub = router.subscribeLiveQuotes(msg.symbols, (quote) => {
+          sendWs(ws, { type: 'quote.update', quote });
+        });
+        return;
+      }
+
+      if (msg.type === 'quote.unsubscribe') {
+        quoteUnsub?.();
+        quoteUnsub = null;
+      }
     });
   });
 
@@ -215,7 +412,6 @@ export async function createBridgeServer(
       return;
     }
 
-    // Origin is MANDATORY on WebSocket upgrades to defeat CSWSH
     const originCheck = validateOriginHeader(req.headers.origin, policy, true);
     if (!originCheck.ok) {
       rejectUpgrade(socket, 403, originCheck.reason ?? 'Forbidden origin');
@@ -235,7 +431,6 @@ export async function createBridgeServer(
 
   const address = await app.listen({ host, port });
   const parsedAddr = new URL(address);
-  // Ensure ephemeral test ports (port: 0) are registered in policy allowlist
   policy.allowedHosts.add(`${parsedAddr.hostname}:${parsedAddr.port}`);
   policy.allowedHosts.add(`localhost:${parsedAddr.port}`);
   policy.allowedHosts.add(`127.0.0.1:${parsedAddr.port}`);
@@ -247,6 +442,7 @@ export async function createBridgeServer(
     wss,
     db,
     vault,
+    router,
     sessionGuard,
     url: address,
     wsUrl: address.replace(/^http/, 'ws') + '/ws',

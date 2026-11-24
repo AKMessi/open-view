@@ -1,15 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ChartController,
-  DEMO_SYMBOLS,
   generateSyntheticBars,
   type FrameTelemetry,
 } from '@openview/chart-engine';
-import type { ChartStyle, PriceScaleMode, Resolution } from '@openview/protocol';
-import { loadBrowserWasm, type WasmRuntimeApi } from '@openview/script-runtime';
-
-const BRIDGE_HTTP = 'http://127.0.0.1:4001';
-const BRIDGE_WS = 'ws://127.0.0.1:4001/ws';
+import {
+  DEFAULT_WATCHLIST_IDS,
+  findSymbolById,
+  parseCsvBars,
+  parseParquetBars,
+} from '@openview/datafeed-sdk';
+import type {
+  ChartStyle,
+  FeedQualityBadge,
+  OHLCVBar,
+  PriceScaleMode,
+  QuoteTick,
+  Resolution,
+  SymbolInfo,
+  WorkspaceSnapshot,
+} from '@openview/protocol';
+import { loadBrowserWasm } from '@openview/script-runtime';
+import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
+import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
+import { WatchlistPanel } from './panels/WatchlistPanel.tsx';
+import { MarketClient, type BridgeConnectionState } from './services/market-client.ts';
+import { loadWorkspaceLocal, saveWorkspaceLocal } from './storage/workspace-store.ts';
 
 const RESOLUTIONS: Resolution[] = ['1', '5', '15', '60', '240', '1D'];
 const STYLES: Array<{ id: ChartStyle; label: string }> = [
@@ -29,158 +45,222 @@ const SCALE_MODES: Array<{ id: PriceScaleMode; label: string }> = [
   { id: 'indexed_to_100', label: '100' },
 ];
 
-interface BridgeStatus {
-  mode: 'connecting' | 'local_bridge' | 'static_mode';
-  vaultMode?: string;
-  wsRttMs?: number;
+function badgeMeta(quality: FeedQualityBadge): { label: string; cls: string } {
+  switch (quality) {
+    case 'live_full_vol':
+      return { label: 'LIVE · FULL VOL', cls: 'bg-[#089981]/15 text-[#089981]' };
+    case 'live_subset_vol':
+      return { label: 'LIVE · SUBSET VOL', cls: 'bg-[#2962ff]/20 text-[#6aa0ff]' };
+    case 'live_quote_zero_vol':
+      return { label: 'LIVE · QUOTE / ZERO VOL', cls: 'bg-[#b39ddb]/20 text-[#b39ddb]' };
+    case 'replay':
+      return { label: 'REPLAY', cls: 'bg-[#f7931a]/20 text-[#f7931a]' };
+    case 'delayed_eod':
+    default:
+      return { label: 'DELAYED / EOD', cls: 'bg-[#f7931a]/15 text-[#f7931a]' };
+  }
 }
 
 export function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<ChartController | null>(null);
-  const wasmRef = useRef<WasmRuntimeApi | null>(null);
+  const clientRef = useRef<MarketClient | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const quoteBufferRef = useRef<Record<string, QuoteTick>>({});
 
-  const [bridge, setBridge] = useState<BridgeStatus>({ mode: 'connecting' });
-  const [wasmVer, setWasmVer] = useState<string>('loading...');
-  const [symbolId, setSymbolId] = useState<string>('BINANCE:BTCUSDT');
+  const [bridge, setBridge] = useState<BridgeConnectionState>({ mode: 'connecting' });
+  const [symbol, setSymbol] = useState<SymbolInfo>(() => findSymbolById('BINANCE:BTCUSDT')!);
   const [resolution, setResolution] = useState<Resolution>('15');
   const [chartStyle, setChartStyle] = useState<ChartStyle>('candles');
   const [scaleMode, setScaleMode] = useState<PriceScaleMode>('linear');
   const [inverted, setInverted] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [showRsiPane, setShowRsiPane] = useState(true);
+  const [showWatchlist, setShowWatchlist] = useState(true);
   const [stress250k, setStress250k] = useState(false);
+  const [providerLabel, setProviderLabel] = useState<string>('Connecting...');
   const [telemetry, setTelemetry] = useState<FrameTelemetry | null>(null);
+  const [quotes, setQuotes] = useState<Record<string, QuoteTick>>({});
+  const [watchlist] = useState<string[]>([...DEFAULT_WATCHLIST_IDS]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchSeed, setSearchSeed] = useState('');
+  const [vaultOpen, setVaultOpen] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
-  const symbol = DEMO_SYMBOLS[symbolId] ?? DEMO_SYMBOLS['BINANCE:BTCUSDT']!;
-
-  // Boot WASM + Bridge status
+  // Restore last workspace from IndexedDB on boot
   useEffect(() => {
-    let active = true;
-    let socket: WebSocket | null = null;
-
-    loadBrowserWasm()
-      .then((api) => {
-        if (!active) return;
-        wasmRef.current = api;
-        setWasmVer(`v${api.version}`);
-      })
-      .catch(() => {
-        if (active) setWasmVer('unavailable');
-      });
-
-    async function connectBridge() {
-      try {
-        const healthRes = await fetch(`${BRIDGE_HTTP}/api/health`, { credentials: 'include' });
-        if (!healthRes.ok) throw new Error('unhealthy');
-        const health = (await healthRes.json()) as { vaultMode: string };
-
-        const sessRes = await fetch(`${BRIDGE_HTTP}/api/v1/auth/session`, {
-          method: 'POST',
-          credentials: 'include',
-        });
-        const { token } = (await sessRes.json()) as { token: string };
-
-        const ticketRes = await fetch(`${BRIDGE_HTTP}/api/v1/auth/ws-ticket`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'x-openview-token': token },
-        });
-        const { ticket } = (await ticketRes.json()) as { ticket: string };
-
-        socket = new WebSocket(`${BRIDGE_WS}?ticket=${encodeURIComponent(ticket)}`);
-        socket.onopen = () => {
-          socket?.send(JSON.stringify({ type: 'ping', id: 1, ts: performance.now() }));
-        };
-        socket.onmessage = (ev) => {
-          const msg = JSON.parse(String(ev.data)) as { type: string; clientTs?: number };
-          if (msg.type === 'pong' && typeof msg.clientTs === 'number' && active) {
-            setBridge({
-              mode: 'local_bridge',
-              vaultMode: health.vaultMode,
-              wsRttMs: Math.max(0.1, Number((performance.now() - msg.clientTs).toFixed(1))),
-            });
-          }
-        };
-        socket.onerror = () => {
-          if (active) setBridge({ mode: 'static_mode' });
-        };
-      } catch {
-        if (active) setBridge({ mode: 'static_mode' });
+    void loadWorkspaceLocal('default').then((ws) => {
+      if (!ws) return;
+      setTheme(ws.theme);
+      const t0 = ws.tiles[0];
+      if (t0) {
+        const found = findSymbolById(t0.symbol);
+        if (found) setSymbol(found);
+        setResolution(t0.resolution);
+        setChartStyle(t0.chartStyle);
+        setScaleMode(t0.priceScaleMode);
+        setInverted(t0.inverted);
       }
-    }
-
-    void connectBridge();
-    return () => {
-      active = false;
-      socket?.close();
-    };
+    });
   }, []);
 
-  // Mount Clean-Room Canvas 2D Chart Controller
+  // Debounced IndexedDB + Bridge SQLite workspace auto-save
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ctrl = new ChartController({
-      symbol,
-      resolution,
-      chartStyle,
-      priceScaleMode: scaleMode,
-      theme,
-    });
-    ctrl.mount(el);
-    controllerRef.current = ctrl;
+    const timer = window.setTimeout(() => {
+      const snapshot: WorkspaceSnapshot = {
+        id: 'default',
+        name: 'Default Workspace',
+        revision: 1,
+        updatedAt: Date.now(),
+        theme,
+        layoutGrid: '1x1',
+        syncCrosshair: true,
+        syncInterval: false,
+        syncTime: false,
+        tiles: [
+          {
+            id: 'tile-1',
+            symbol: symbol.id,
+            resolution,
+            chartStyle,
+            priceScaleMode: scaleMode,
+            inverted,
+            syncGroup: 'none',
+            showVolume: true,
+            useFuturesVolumeProxy: false,
+          },
+        ],
+        drawings: [],
+      };
+      void saveWorkspaceLocal(snapshot);
+      void clientRef.current?.syncWorkspaceToBridge(snapshot);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [symbol.id, resolution, chartStyle, scaleMode, inverted, theme]);
 
-    const timer = window.setInterval(() => {
-      setTelemetry(ctrl.getTelemetry());
-    }, 300);
+  // Boot MarketClient + mount clean-room Canvas 2D controller
+  useEffect(() => {
+    const client = new MarketClient();
+    clientRef.current = client;
+    const unsubState = client.onConnectionChange(setBridge);
+
+    const el = containerRef.current;
+    let ctrl: ChartController | null = null;
+    if (el) {
+      ctrl = new ChartController({
+        symbol,
+        resolution,
+        chartStyle,
+        priceScaleMode: scaleMode,
+        theme,
+      });
+      ctrl.mount(el);
+      controllerRef.current = ctrl;
+      ctrl.onLoadMoreHistory((beforeTime) => {
+        client.requestMoreHistory('tile-1', beforeTime, 400);
+      });
+    }
+
+    let unsubQuotes: (() => void) | null = null;
+    void client.connect().then(() => {
+      unsubQuotes = client.subscribeQuotes(watchlist, (q) => {
+        quoteBufferRef.current[q.symbol] = q;
+      });
+    });
+
+    // rAF/interval-throttled UI snapshots (<= 4 Hz for React Watchlist & Telemetry — zero hot-path jitter!)
+    const uiTimer = window.setInterval(() => {
+      if (ctrl) setTelemetry(ctrl.getTelemetry());
+      const buffered = quoteBufferRef.current;
+      if (Object.keys(buffered).length > 0) {
+        setQuotes((prev) => ({ ...prev, ...buffered }));
+        quoteBufferRef.current = {};
+      }
+    }, 250);
 
     return () => {
-      window.clearInterval(timer);
-      ctrl.destroy();
+      window.clearInterval(uiTimer);
+      unsubQuotes?.();
+      unsubState();
+      client.dispose();
+      ctrl?.destroy();
       controllerRef.current = null;
+      clientRef.current = null;
     };
-    // Mount once on boot; reactive updates use imperative controller methods
+    // Mount once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Push symbol / resolution / dataset changes imperatively (zero React render hot-path)
+  const applyRsiToBars = (ctrl: ChartController, bars: readonly OHLCVBar[]) => {
+    if (!showRsiPane) {
+      ctrl.removeSubPane('rsi14');
+      return;
+    }
+    ctrl.addSubPane('rsi14', 0.23, 2);
+    const closes = new Float64Array(bars.length);
+    for (let i = 0; i < bars.length; i++) closes[i] = bars[i]!.close;
+    void loadBrowserWasm()
+      .then((api) => {
+        const rsi = api.taRsi(closes, 14);
+        ctrl.setSubPanePlots(
+          'rsi14',
+          [
+            {
+              id: 'rsi14',
+              title: 'RSI (14)',
+              color: '#7e57c2',
+              kind: 'line',
+              startBarIndex: 0,
+              values: rsi,
+              refLines: [30, 70],
+            },
+          ],
+          [0, 100],
+        );
+      })
+      .catch(() => {});
+  };
+
+  // Subscribe chart to live Bridge / Direct datafeed whenever symbol, resolution, or bridge state changes
   useEffect(() => {
     const ctrl = controllerRef.current;
-    if (!ctrl) return;
-    ctrl.setSymbolInfo(symbol, resolution);
-    const barCount = stress250k ? 250_000 : 2_000;
-    const bars = generateSyntheticBars(symbol, resolution, barCount, symbolId.length * 13);
-    ctrl.setBars(bars, stress250k ? 250_000 : 140);
+    const client = clientRef.current;
+    if (!ctrl || !client || bridge.mode === 'connecting') return;
 
-    if (showRsiPane) {
-      ctrl.addSubPane('rsi14', 0.24, 2);
-      const closes = new Float64Array(bars.length);
-      for (let i = 0; i < bars.length; i++) closes[i] = bars[i]!.close;
-      loadBrowserWasm()
-        .then((api) => {
-          const rsi = api.taRsi(closes, 14);
-          ctrl.setSubPanePlots(
-            'rsi14',
-            [
-              {
-                id: 'rsi14',
-                title: 'RSI (14)',
-                color: '#7e57c2',
-                kind: 'line',
-                startBarIndex: 0,
-                values: rsi,
-                refLines: [30, 70],
-              },
-            ],
-            [0, 100],
-          );
-        })
-        .catch(() => {});
-    } else {
-      ctrl.removeSubPane('rsi14');
+    if (stress250k) {
+      const bars = generateSyntheticBars(symbol, resolution, 250_000, 99);
+      ctrl.setSymbolInfo(symbol, resolution);
+      ctrl.setBars(bars, 250_000);
+      setProviderLabel('250k Mipmap Benchmark');
+      applyRsiToBars(ctrl, bars);
+      return;
     }
-  }, [symbol, symbolId, resolution, showRsiPane, stress250k]);
+
+    const activeBarsRef: OHLCVBar[] = [];
+    const unsub = client.subscribeChart('tile-1', symbol.id, resolution, {
+      onSnapshot: (resolvedInfo, bars, _noMore, label) => {
+        activeBarsRef.length = 0;
+        activeBarsRef.push(...bars);
+        setSymbol(resolvedInfo);
+        setProviderLabel(label);
+        ctrl.setSymbolInfo(resolvedInfo, resolution);
+        ctrl.setBars(bars, 140);
+        applyRsiToBars(ctrl, bars);
+      },
+      onBarUpdate: (bar, quality) => {
+        ctrl.upsertBar(bar);
+        setSymbol((prev) => (prev.feedQuality === quality ? prev : { ...prev, feedQuality: quality }));
+      },
+      onHistoryResult: (olderBars) => {
+        if (olderBars.length > 0) {
+          ctrl.prependBars(olderBars);
+        }
+      },
+    });
+
+    return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol.id, resolution, bridge.mode, stress250k, showRsiPane, reloadNonce]);
 
   useEffect(() => {
     controllerRef.current?.setChartStyle(chartStyle);
@@ -198,9 +278,21 @@ export function App() {
     controllerRef.current?.setTheme(theme);
   }, [theme]);
 
-  // TradingView-parity keyboard shortcuts
+  // TradingView-parity keyboard shortcuts (Ctrl+K, start typing letters -> Symbol Search, Alt+L/I/R)
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      const inInput =
+        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT';
+
+      if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') {
+        ev.preventDefault();
+        setSearchSeed('');
+        setSearchOpen(true);
+        return;
+      }
+      if (inInput || searchOpen || vaultOpen) return;
+
       if (ev.altKey && ev.key.toLowerCase() === 'l') {
         ev.preventDefault();
         setScaleMode((m) => (m === 'symlog' ? 'linear' : 'symlog'));
@@ -210,11 +302,43 @@ export function App() {
       } else if (ev.altKey && ev.key.toLowerCase() === 'r') {
         ev.preventDefault();
         controllerRef.current?.resetView();
+      } else if (!ev.ctrlKey && !ev.metaKey && !ev.altKey && /^[a-zA-Z]$/.test(ev.key)) {
+        setSearchSeed(ev.key.toUpperCase());
+        setSearchOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [searchOpen, vaultOpen]);
+
+  const handleLocalFile = async (ev: React.ChangeEvent<HTMLInputElement>) => {
+    const file = ev.target.files?.[0];
+    if (!file || !controllerRef.current) return;
+    try {
+      const bars = file.name.toLowerCase().endsWith('.parquet')
+        ? await parseParquetBars(await file.arrayBuffer())
+        : parseCsvBars(await file.text());
+      if (bars.length > 0) {
+        const localSym: SymbolInfo = {
+          ...symbol,
+          id: `LOCAL:${file.name}`,
+          ticker: file.name.replace(/\.(csv|parquet)$/i, '').toUpperCase(),
+          exchange: 'LOCAL FILE',
+          provider: 'local_file',
+          feedQuality: 'delayed_eod',
+          hasVolume: bars.some((b) => b.volume > 0),
+        };
+        setSymbol(localSym);
+        setProviderLabel(`${file.name} (${bars.length.toLocaleString()} bars)`);
+        controllerRef.current.setSymbolInfo(localSym, resolution);
+        controllerRef.current.setBars(bars, 160);
+        applyRsiToBars(controllerRef.current, bars);
+      }
+    } catch {
+      setProviderLabel('Failed to parse CSV/Parquet file');
+    }
+    ev.target.value = '';
+  };
 
   const handleSnapshot = () => {
     const url = controllerRef.current?.exportSnapshotDataUrl();
@@ -226,6 +350,7 @@ export function App() {
   };
 
   const isDark = theme === 'dark';
+  const badge = badgeMeta(symbol.feedQuality);
 
   return (
     <div
@@ -241,22 +366,30 @@ export function App() {
         <div className="flex items-center gap-2 overflow-x-auto">
           <span className="font-bold tracking-tight text-[#2962ff]">OpenView</span>
 
-          {/* Symbol Switcher across all 4 target markets */}
-          <select
-            value={symbolId}
-            onChange={(e) => setSymbolId(e.target.value)}
-            className={`rounded border px-2 py-1 font-mono text-xs font-semibold outline-none ${
+          {/* Symbol Search Trigger */}
+          <button
+            onClick={() => {
+              setSearchSeed('');
+              setSearchOpen(true);
+            }}
+            className={`flex items-center gap-2 rounded border px-2.5 py-1 font-mono text-xs font-semibold transition ${
               isDark
-                ? 'border-[#2a2e39] bg-[#1e222d] text-white'
-                : 'border-[#d1d4dc] bg-[#f0f3fa] text-[#131722]'
+                ? 'border-[#2a2e39] bg-[#1e222d] text-white hover:border-[#2962ff]'
+                : 'border-[#d1d4dc] bg-[#f0f3fa] text-[#131722] hover:border-[#2962ff]'
             }`}
+            title="Search symbols (Ctrl+K or start typing)"
           >
-            {Object.values(DEMO_SYMBOLS).map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.exchange}:{s.ticker} ({s.market})
-              </option>
-            ))}
-          </select>
+            <span>{symbol.ticker}</span>
+            <span className="text-[10px] font-normal text-[#787b86]">{symbol.exchange}</span>
+          </button>
+
+          {/* Honest Feed & Volume Integrity Badge */}
+          <span
+            className={`hidden rounded px-1.5 py-0.5 font-mono text-[10px] font-medium xl:inline ${badge.cls}`}
+            title={`Active data source: ${providerLabel}`}
+          >
+            ● {badge.label}
+          </span>
 
           <div className="h-4 w-px bg-[#2a2e39]" />
 
@@ -332,8 +465,23 @@ export function App() {
               showRsiPane ? 'bg-[#7e57c2]/25 text-[#b39ddb]' : 'text-[#787b86] hover:bg-[#1e222d]'
             }`}
           >
-            RSI(14) WASM
+            RSI(14)
           </button>
+
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded px-2 py-1 text-[11px] text-[#868993] hover:bg-[#1e222d] hover:text-white"
+            title="Load local CSV or Parquet OHLCV file (hyparquet)"
+          >
+            CSV/Parquet
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.parquet"
+            className="hidden"
+            onChange={handleLocalFile}
+          />
 
           <button
             onClick={() => setStress250k((v) => !v)}
@@ -341,21 +489,26 @@ export function App() {
               stress250k ? 'bg-[#089981]/25 text-[#089981]' : 'text-[#787b86] hover:bg-[#1e222d]'
             }`}
           >
-            {stress250k ? '250k Bars ON' : '250k Stress'}
+            {stress250k ? '250k ON' : '250k'}
           </button>
         </div>
 
         <div className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
           {telemetry && (
-            <span className="hidden text-[#787b86] lg:inline">
+            <span className="hidden text-[#787b86] 2xl:inline">
               {telemetry.medianFrameMs}ms · {telemetry.drawnBars}/{telemetry.totalBars.toLocaleString()} (x
-              {telemetry.mipmapStride}) · {telemetry.dpr}x
+              {telemetry.mipmapStride})
             </span>
           )}
           <button
+            onClick={() => setVaultOpen(true)}
+            className="rounded border border-[#2962ff]/50 bg-[#2962ff]/15 px-2 py-1 text-[11px] font-medium text-[#6aa0ff] hover:bg-[#2962ff]/25"
+          >
+            Providers / Keys
+          </button>
+          <button
             onClick={handleSnapshot}
             className="rounded border border-[#2a2e39] px-2 py-1 text-[11px] hover:bg-[#1e222d]"
-            title="Export PNG Snapshot"
           >
             PNG
           </button>
@@ -365,13 +518,25 @@ export function App() {
           >
             {isDark ? 'Light' : 'Dark'}
           </button>
-          <span className="hidden text-[#787b86] md:inline">WASM {wasmVer}</span>
+          <button
+            onClick={() => setShowWatchlist((v) => !v)}
+            className={`rounded border border-[#2a2e39] px-2 py-1 text-[11px] ${
+              showWatchlist ? 'bg-[#1e222d] text-white' : 'text-[#787b86]'
+            }`}
+          >
+            WL
+          </button>
           <span
             className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
               bridge.mode === 'local_bridge'
                 ? 'bg-[#089981]/15 text-[#089981]'
                 : 'bg-[#f7931a]/15 text-[#f7931a]'
             }`}
+            title={
+              bridge.mode === 'local_bridge'
+                ? `Secured Local Bridge (${bridge.vaultMode})`
+                : 'Bridge Offline — Static Mode (Public Crypto WS + Local Files)'
+            }
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
@@ -383,10 +548,49 @@ export function App() {
         </div>
       </header>
 
-      {/* Main 2-Canvas Clean-Room Chart Tile */}
-      <main className="relative flex-1 overflow-hidden">
-        <div ref={containerRef} className="h-full w-full" />
-      </main>
+      {/* Main Chart Tile + Right Multi-Market Watchlist */}
+      <div className="flex flex-1 overflow-hidden">
+        <main className="relative flex-1 overflow-hidden">
+          <div ref={containerRef} className="h-full w-full" />
+        </main>
+        {showWatchlist && (
+          <WatchlistPanel
+            symbolIds={watchlist}
+            activeSymbolId={symbol.id}
+            quotes={quotes}
+            isDark={isDark}
+            onSelect={(sym) => {
+              setStress250k(false);
+              setSymbol(sym);
+            }}
+            onOpenSearch={() => {
+              setSearchSeed('');
+              setSearchOpen(true);
+            }}
+          />
+        )}
+      </div>
+
+      <SymbolSearchModal
+        open={searchOpen}
+        initialQuery={searchSeed}
+        onClose={() => setSearchOpen(false)}
+        onSelect={(sym) => {
+          setStress250k(false);
+          setSymbol(sym);
+        }}
+      />
+
+      {clientRef.current && (
+        <ProviderVaultModal
+          open={vaultOpen}
+          client={clientRef.current}
+          bridgeOnline={bridge.mode === 'local_bridge'}
+          {...(bridge.vaultMode ? { vaultMode: bridge.vaultMode } : {})}
+          onClose={() => setVaultOpen(false)}
+          onUpdated={() => setReloadNonce((n) => n + 1)}
+        />
+      )}
     </div>
   );
 }
