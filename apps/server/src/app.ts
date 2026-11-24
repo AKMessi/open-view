@@ -6,7 +6,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { ExecutionAirlock, type LiveOrderRequest, type SebiComplianceState } from '@openview/broker-sdk';
-import { findSymbolById, searchCatalog } from '@openview/datafeed-sdk';
+import { findSymbolById } from '@openview/datafeed-sdk';
 import {
   parseWsClientMessage,
   type MarketCategory,
@@ -15,6 +15,7 @@ import {
 } from '@openview/protocol';
 import { AlertEngine, type AlertRule } from './alerts/alert-engine.ts';
 import { MarketDataRouter, SUPPORTED_PROVIDERS, type ProviderId } from './providers/market-router.ts';
+import { UniversalSymbolDirectory } from './providers/symbol-directory.ts';
 import { MultiMarketScreener, type ScreenerQuery } from './screener/screener-service.ts';
 import {
   CSRF_HEADER_NAME,
@@ -123,6 +124,8 @@ export async function createBridgeServer(
   const db = new DbWorkerClient(dbPath);
   await db.ping();
   const router = new MarketDataRouter(db, vault);
+  const directory = new UniversalSymbolDirectory();
+  void directory.warmUp();
   const alerts = new AlertEngine();
   const screener = new MultiMarketScreener(router);
   const airlock = new ExecutionAirlock();
@@ -208,12 +211,13 @@ export async function createBridgeServer(
     return { ok: true, ticket, expiresAt };
   });
 
-  // Symbol search across all 4 markets
+  // Universal symbol search across 4,250+ cached exchange masters (Binance, Hyperliquid, NSE) + 100k+ live Yahoo global search
   app.get('/api/v1/symbols/search', async (request) => {
     const q = request.query as { q?: string; market?: string; limit?: string };
     const market = (q.market ?? 'all') as MarketCategory | 'all';
-    const limit = Math.min(100, Math.max(1, Number(q.limit ?? 40)));
-    return { ok: true, symbols: searchCatalog(q.q ?? '', market, limit) };
+    const limit = Math.min(100, Math.max(1, Number(q.limit ?? 50)));
+    const { symbols, stats } = await directory.search(q.q ?? '', market, limit);
+    return { ok: true, symbols, stats };
   });
 
   // Historical OHLCV endpoint

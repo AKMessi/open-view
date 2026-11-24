@@ -241,8 +241,42 @@ export const SYMBOL_CATALOG: readonly SymbolInfo[] = [
     supportsTicks: true,
     feedQuality: 'live_quote_zero_vol',
   },
+  ...([
+    ['AUDUSD', 'Australian Dollar / US Dollar', 'USD', 0.00001, 5, 'forex'],
+    ['USDCAD', 'US Dollar / Canadian Dollar', 'CAD', 0.00001, 5, 'forex'],
+    ['USDCHF', 'US Dollar / Swiss Franc', 'CHF', 0.00001, 5, 'forex'],
+    ['NZDUSD', 'New Zealand Dollar / US Dollar', 'USD', 0.00001, 5, 'forex'],
+    ['EURJPY', 'Euro / Japanese Yen', 'JPY', 0.001, 3, 'forex'],
+    ['GBPJPY', 'British Pound / Japanese Yen', 'JPY', 0.001, 3, 'forex'],
+    ['EURGBP', 'Euro / British Pound', 'GBP', 0.00001, 5, 'forex'],
+    ['USOIL', 'WTI Crude Oil Futures (CL=F)', 'USD', 0.01, 2, 'commodities'],
+    ['UKOIL', 'Brent Crude Oil Futures (BZ=F)', 'USD', 0.01, 2, 'commodities'],
+    ['NATGAS', 'Henry Hub Natural Gas (NG=F)', 'USD', 0.001, 3, 'commodities'],
+    ['COPPER', 'High Grade Copper Futures (HG=F)', 'USD', 0.0005, 4, 'commodities'],
+    ['DXY', 'US Dollar Currency Index', 'USD', 0.01, 2, 'index'],
+  ] as const).map(
+    ([ticker, description, currency, tickSize, precision, market]): SymbolInfo => ({
+      id: `FX:${ticker}`,
+      ticker,
+      description,
+      exchange: market === 'commodities' ? 'COMMODITY' : market === 'index' ? 'INDEX' : 'FX OTC',
+      provider: 'fx_auto',
+      market,
+      segment: market === 'index' ? 'index' : 'fx',
+      currency,
+      timezone: 'America/New_York',
+      calendarId: 'FOREX_OTC',
+      tickSize,
+      precision,
+      lotSize: 1,
+      hasVolume: market === 'commodities',
+      supportsOrderbook: false,
+      supportsTicks: true,
+      feedQuality: 'live_quote_zero_vol',
+    }),
+  ),
 
-  // ── 3. US EQUITIES & ETFs ───────────────────────────────────────────────
+  // ── 3. US EQUITIES, ETFs & INDICES ──────────────────────────────────────
   ...([
     ['AAPL', 'Apple Inc.', 'NASDAQ'],
     ['NVDA', 'NVIDIA Corporation', 'NASDAQ'],
@@ -250,8 +284,16 @@ export const SYMBOL_CATALOG: readonly SymbolInfo[] = [
     ['TSLA', 'Tesla, Inc.', 'NASDAQ'],
     ['AMZN', 'Amazon.com, Inc.', 'NASDAQ'],
     ['META', 'Meta Platforms, Inc.', 'NASDAQ'],
+    ['GOOGL', 'Alphabet Inc. Class A', 'NASDAQ'],
+    ['AMD', 'Advanced Micro Devices, Inc.', 'NASDAQ'],
+    ['PLTR', 'Palantir Technologies Inc.', 'NASDAQ'],
+    ['NFLX', 'Netflix, Inc.', 'NASDAQ'],
+    ['COIN', 'Coinbase Global, Inc.', 'NASDAQ'],
     ['SPY', 'SPDR S&P 500 ETF Trust', 'ARCA'],
     ['QQQ', 'Invesco QQQ Trust', 'NASDAQ'],
+    ['SPX', 'S&P 500 Index', 'INDEX'],
+    ['NDX', 'NASDAQ-100 Index', 'INDEX'],
+    ['VIX', 'CBOE Volatility Index', 'CBOE'],
   ] as const).map(
     ([ticker, description, exchange]): SymbolInfo => ({
       id: `US:${ticker}`,
@@ -259,15 +301,15 @@ export const SYMBOL_CATALOG: readonly SymbolInfo[] = [
       description,
       exchange,
       provider: 'us_auto',
-      market: 'us_equity',
-      segment: 'equity',
+      market: exchange === 'INDEX' || exchange === 'CBOE' ? 'index' : 'us_equity',
+      segment: exchange === 'INDEX' || exchange === 'CBOE' ? 'index' : 'equity',
       currency: 'USD',
       timezone: 'America/New_York',
       calendarId: 'US_EQUITY',
       tickSize: 0.01,
       precision: 2,
       lotSize: 1,
-      hasVolume: true,
+      hasVolume: exchange !== 'INDEX' && exchange !== 'CBOE',
       supportsOrderbook: false,
       supportsTicks: true,
       feedQuality: 'delayed_eod',
@@ -453,11 +495,58 @@ export function findSymbolById(symbolId: string): SymbolInfo | null {
         feedQuality: 'live_full_vol',
       };
     }
+    if (prefix === 'HYPERLIQUID') {
+      const coin = ticker.replace(/-PERP$/i, '');
+      return {
+        id: key,
+        ticker: `${coin}-PERP`,
+        description: `${coin} Perpetual Futures (Hyperliquid)`,
+        exchange: 'HYPERLIQUID',
+        provider: 'hyperliquid',
+        market: 'crypto',
+        segment: 'perps',
+        currency: 'USD',
+        timezone: 'UTC',
+        calendarId: 'CRYPTO',
+        tickSize: 0.0001,
+        precision: 4,
+        lotSize: 0.01,
+        hasVolume: true,
+        supportsOrderbook: true,
+        supportsTicks: true,
+        feedQuality: 'live_full_vol',
+      };
+    }
+    if (prefix === 'FX') {
+      const isJpy = ticker.endsWith('JPY');
+      const isInr = ticker.endsWith('INR');
+      const isMetalOrOil = ['XAUUSD', 'XAGUSD', 'USOIL', 'UKOIL', 'NATGAS', 'COPPER'].includes(ticker);
+      const tickSize = isMetalOrOil ? 0.01 : isJpy ? 0.001 : isInr ? 0.0025 : 0.00001;
+      return {
+        id: key,
+        ticker,
+        description: `${ticker} (${isMetalOrOil ? 'Commodity' : 'Forex OTC'})`,
+        exchange: isMetalOrOil ? 'COMMODITY' : 'FX OTC',
+        provider: 'fx_auto',
+        market: isMetalOrOil ? 'commodities' : 'forex',
+        segment: 'fx',
+        currency: isInr ? 'INR' : isJpy ? 'JPY' : 'USD',
+        timezone: 'America/New_York',
+        calendarId: 'FOREX_OTC',
+        tickSize,
+        precision: precisionFromTickSize(tickSize),
+        lotSize: 1,
+        hasVolume: isMetalOrOil,
+        supportsOrderbook: false,
+        supportsTicks: true,
+        feedQuality: 'live_quote_zero_vol',
+      };
+    }
     if (prefix === 'US') {
       return {
         id: key,
         ticker,
-        description: `${ticker} (US Equity)`,
+        description: `${ticker} (US Equity / ETF)`,
         exchange: 'US',
         provider: 'us_auto',
         market: 'us_equity',
@@ -476,6 +565,70 @@ export function findSymbolById(symbolId: string): SymbolInfo | null {
     }
     if (prefix === 'NSE') {
       return nseEquity(ticker, `${ticker} (NSE Equity)`, 500);
+    }
+    if (prefix === 'BSE') {
+      const isIndex = ticker === 'SENSEX';
+      return {
+        id: key,
+        ticker,
+        description: isIndex ? 'S&P BSE SENSEX Index' : `${ticker} (BSE Equity)`,
+        exchange: 'BSE',
+        provider: 'nse_auto',
+        market: isIndex ? 'index' : 'india_nse',
+        segment: isIndex ? 'index' : 'equity',
+        currency: 'INR',
+        timezone: 'Asia/Kolkata',
+        calendarId: 'NSE',
+        tickSize: 0.05,
+        precision: 2,
+        lotSize: 1,
+        hasVolume: !isIndex,
+        supportsOrderbook: false,
+        supportsTicks: true,
+        feedQuality: 'delayed_eod',
+      };
+    }
+    if (prefix === 'MCX') {
+      return {
+        id: key,
+        ticker,
+        description: `${ticker} (MCX Commodity Futures)`,
+        exchange: 'MCX',
+        provider: 'nse_auto',
+        market: 'india_mcx',
+        segment: 'futures',
+        currency: 'INR',
+        timezone: 'Asia/Kolkata',
+        calendarId: 'MCX',
+        tickSize: 1.0,
+        precision: 0,
+        lotSize: 1,
+        hasVolume: true,
+        supportsOrderbook: true,
+        supportsTicks: true,
+        feedQuality: 'delayed_eod',
+      };
+    }
+    if (prefix === 'GLOBAL') {
+      return {
+        id: key,
+        ticker,
+        description: `${ticker} (Global Market)`,
+        exchange: 'GLOBAL',
+        provider: 'global_auto',
+        market: ticker.startsWith('^') ? 'index' : ticker.endsWith('=F') ? 'futures' : 'us_equity',
+        segment: ticker.startsWith('^') ? 'index' : ticker.endsWith('=F') ? 'futures' : 'equity',
+        currency: 'USD',
+        timezone: 'UTC',
+        calendarId: ticker.endsWith('=X') || ticker.endsWith('=F') ? 'FOREX_OTC' : 'US_EQUITY',
+        tickSize: 0.01,
+        precision: 2,
+        lotSize: 1,
+        hasVolume: !ticker.startsWith('^') && !ticker.endsWith('=X'),
+        supportsOrderbook: false,
+        supportsTicks: true,
+        feedQuality: 'delayed_eod',
+      };
     }
   }
   return null;

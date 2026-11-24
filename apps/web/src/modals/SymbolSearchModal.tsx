@@ -2,23 +2,27 @@ import { useEffect, useRef, useState } from 'react';
 import { isSpreadExpression, parseSpreadExpression, type SpreadAlignmentMode } from '@openview/chart-types';
 import { findSymbolById, searchCatalog } from '@openview/datafeed-sdk';
 import type { MarketCategory, SymbolInfo } from '@openview/protocol';
+import type { MarketClient } from '../services/market-client.ts';
 
 interface SymbolSearchModalProps {
   open: boolean;
   initialQuery?: string;
+  client: MarketClient;
+  watchlistIds: readonly string[];
   spreadAlignment?: SpreadAlignmentMode;
   onChangeSpreadAlignment?: (mode: SpreadAlignmentMode) => void;
+  onToggleWatchlist: (symbolId: string) => void;
   onClose: () => void;
   onSelect: (symbol: SymbolInfo) => void;
 }
 
 const TABS: Array<{ id: MarketCategory | 'all'; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'crypto', label: 'Crypto' },
-  { id: 'forex', label: 'Forex & Gold' },
-  { id: 'us_equity', label: 'US Stocks' },
-  { id: 'india_nse', label: 'India NSE / MCX' },
-  { id: 'futures', label: 'Futures (1!)' },
+  { id: 'all', label: 'All Global' },
+  { id: 'crypto', label: 'Crypto (Spot + Perps)' },
+  { id: 'forex', label: 'Forex & Commodities' },
+  { id: 'us_equity', label: 'US Stocks & ETFs' },
+  { id: 'india_nse', label: 'India NSE / BSE / MCX' },
+  { id: 'futures', label: 'Futures' },
 ];
 
 function resolveSpreadSymbolToken(rawToken: string): string {
@@ -73,14 +77,20 @@ function buildSpreadSymbolInfo(rawExpr: string): { sym: SymbolInfo; legs: string
 export function SymbolSearchModal({
   open,
   initialQuery = '',
+  client,
+  watchlistIds,
   spreadAlignment = 'ffill',
   onChangeSpreadAlignment,
+  onToggleWatchlist,
   onClose,
   onSelect,
 }: SymbolSearchModalProps) {
   const [query, setQuery] = useState(initialQuery);
   const [tab, setTab] = useState<MarketCategory | 'all'>('all');
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [results, setResults] = useState<SymbolInfo[]>(() => searchCatalog('', 'all', 60));
+  const [totalCached, setTotalCached] = useState<number | null>(null);
+  const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -91,10 +101,33 @@ export function SymbolSearchModal({
     }
   }, [open, initialQuery]);
 
+  // Live Universal Directory + Global Search (debounced 150ms)
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    // Instant local match first so UI feels 0ms responsive
+    setResults(searchCatalog(query, tab, 60));
+    setSearching(true);
+
+    const timer = window.setTimeout(() => {
+      void client.searchSymbols(query, tab, 80).then((res) => {
+        if (cancelled) return;
+        setResults(res.symbols);
+        if (res.totalCached !== undefined) setTotalCached(res.totalCached);
+        setSearching(false);
+      });
+    }, query.trim().length > 0 ? 150 : 10);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, query, tab, client]);
+
   if (!open) return null;
 
   const spreadCandidate = buildSpreadSymbolInfo(query);
-  const results = searchCatalog(query, tab, 50);
+  const watchlistSet = new Set(watchlistIds);
 
   const handleKeyDown = (ev: React.KeyboardEvent) => {
     if (ev.key === 'Escape') {
@@ -119,11 +152,11 @@ export function SymbolSearchModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 pt-16 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 pt-14 backdrop-blur-xs"
       onClick={onClose}
     >
       <div
-        className="flex max-h-[75vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-[#2a2e39] bg-[#131722] shadow-2xl"
+        className="flex max-h-[78vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-[#2a2e39] bg-[#131722] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
@@ -136,9 +169,14 @@ export function SymbolSearchModal({
               setQuery(e.target.value);
               setSelectedIdx(0);
             }}
-            placeholder="Search symbol or enter Synthetic Spread (e.g. XAUUSD/XAGUSD, ETHUSDT/BTCUSDT, BANKNIFTY/NIFTY)"
+            placeholder="Search ANY crypto, US stock, Indian NSE/BSE stock, Forex, Gold, Oil, or Spread (e.g. PEPE, PLTR, SUZLON, XAUUSD/XAGUSD)"
             className="w-full bg-transparent text-sm text-white outline-none placeholder:text-[#787b86]"
           />
+          {totalCached !== null && (
+            <span className="shrink-0 rounded bg-[#089981]/15 px-1.5 py-0.5 font-mono text-[10px] text-[#089981]">
+              {totalCached.toLocaleString()}+ + Global
+            </span>
+          )}
           <kbd className="rounded border border-[#2a2e39] px-1.5 py-0.5 font-mono text-[10px] text-[#787b86]">
             ESC
           </kbd>
@@ -179,57 +217,86 @@ export function SymbolSearchModal({
           </div>
         )}
 
-        <div className="flex gap-1 border-b border-[#2a2e39] px-3 py-2">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => {
-                setTab(t.id);
-                setSelectedIdx(0);
-              }}
-              className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
-                tab === t.id
-                  ? 'bg-[#2962ff] text-white'
-                  : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2a2e39] px-3 py-2">
+          <div className="flex flex-wrap gap-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => {
+                  setTab(t.id);
+                  setSelectedIdx(0);
+                }}
+                className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                  tab === t.id
+                    ? 'bg-[#2962ff] text-white'
+                    : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {searching && (
+            <span className="font-mono text-[10px] text-[#6aa0ff]">Searching global markets...</span>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto">
           {results.length === 0 ? (
             <div className="p-8 text-center text-xs text-[#787b86]">
-              {spreadCandidate
-                ? 'Press Enter to launch the Synthetic Spread chart above.'
-                : 'No matching symbols. Try BTCUSDT, XAUUSD, NVDA, RELIANCE, NIFTY1!, or a spread like XAUUSD/XAGUSD.'}
+              {searching
+                ? 'Querying global exchange directory...'
+                : spreadCandidate
+                  ? 'Press Enter to launch the Synthetic Spread chart above.'
+                  : 'No matching symbols found. Try any Binance pair (PEPEUSDT, SUIUSDT), Hyperliquid perp (HYPE), US stock (PLTR, AMD), NSE stock (SUZLON, ZOMATO/ETERNAL, HAL), Forex (AUDUSD, GBPJPY), or a spread (XAUUSD/XAGUSD).'}
             </div>
           ) : (
-            results.map((sym, idx) => (
-              <button
-                key={sym.id}
-                onClick={() => {
-                  onSelect(sym);
-                  onClose();
-                }}
-                onMouseEnter={() => setSelectedIdx(idx)}
-                className={`flex w-full items-center justify-between border-b border-[#1e222d] px-4 py-2.5 text-left text-xs transition ${
-                  idx === selectedIdx ? 'bg-[#1e222d]' : ''
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="w-28 font-mono font-semibold text-white">{sym.ticker}</span>
-                  <span className="text-[#868993]">{sym.description}</span>
+            results.map((sym, idx) => {
+              const inWl = watchlistSet.has(sym.id);
+              return (
+                <div
+                  key={sym.id}
+                  onMouseEnter={() => setSelectedIdx(idx)}
+                  className={`flex w-full items-center justify-between border-b border-[#1e222d] px-4 py-2 text-left text-xs transition ${
+                    idx === selectedIdx ? 'bg-[#1e222d]' : ''
+                  }`}
+                >
+                  <button
+                    onClick={() => {
+                      onSelect(sym);
+                      onClose();
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
+                    <span className="w-32 shrink-0 truncate font-mono font-semibold text-white">
+                      {sym.ticker}
+                    </span>
+                    <span className="truncate text-[#868993]">{sym.description}</span>
+                  </button>
+
+                  <div className="ml-3 flex shrink-0 items-center gap-2 font-mono text-[10px]">
+                    <span className="rounded bg-[#2a2e39] px-1.5 py-0.5 text-[#d1d4dc]">
+                      {sym.exchange}
+                    </span>
+                    <span className="w-10 text-right text-[#787b86]">{sym.currency}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleWatchlist(sym.id);
+                      }}
+                      title={inWl ? 'Remove from Watchlist' : 'Add to Watchlist'}
+                      className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                        inWl
+                          ? 'border-[#089981]/50 bg-[#089981]/20 text-[#089981]'
+                          : 'border-[#2a2e39] text-[#868993] hover:border-[#2962ff] hover:text-white'
+                      }`}
+                    >
+                      {inWl ? '✓ WL' : '+ WL'}
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 font-mono text-[10px]">
-                  <span className="rounded bg-[#2a2e39] px-1.5 py-0.5 text-[#d1d4dc]">
-                    {sym.exchange}
-                  </span>
-                  <span className="text-[#787b86]">{sym.currency}</span>
-                </div>
-              </button>
-            ))
+              );
+            })
           )}
         </div>
       </div>

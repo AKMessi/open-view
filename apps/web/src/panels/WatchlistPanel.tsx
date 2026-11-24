@@ -7,6 +7,7 @@ interface WatchlistPanelProps {
   quotes: Record<string, QuoteTick>;
   isDark: boolean;
   onSelect: (symbol: SymbolInfo) => void;
+  onRemove?: (symbolId: string) => void;
   onOpenSearch: () => void;
 }
 
@@ -16,11 +17,12 @@ export function WatchlistPanel({
   quotes,
   isDark,
   onSelect,
+  onRemove,
   onOpenSearch,
 }: WatchlistPanelProps) {
   return (
     <aside
-      className={`flex h-full w-60 shrink-0 flex-col border-l text-xs ${
+      className={`flex h-full w-64 shrink-0 flex-col border-l text-xs ${
         isDark ? 'border-[#2a2e39] bg-[#131722]' : 'border-[#e0e3eb] bg-white'
       }`}
     >
@@ -29,13 +31,15 @@ export function WatchlistPanel({
           isDark ? 'border-[#2a2e39]' : 'border-[#e0e3eb]'
         }`}
       >
-        <span className="font-semibold tracking-wide uppercase text-[#868993]">Watchlist</span>
+        <span className="font-semibold tracking-wide uppercase text-[#868993]">
+          Watchlist ({symbolIds.length})
+        </span>
         <button
           onClick={onOpenSearch}
-          className="rounded px-1.5 py-0.5 text-sm text-[#868993] hover:bg-[#1e222d] hover:text-white"
-          title="Add or search symbol (Ctrl+K)"
+          className="rounded px-1.5 py-0.5 text-sm font-semibold text-[#6aa0ff] hover:bg-[#1e222d] hover:text-white"
+          title="Add any Crypto, Forex, US or Indian NSE symbol (Ctrl+K)"
         >
-          +
+          + Add
         </button>
       </div>
 
@@ -59,10 +63,9 @@ export function WatchlistPanel({
           const color = pct >= 0 ? 'text-[#089981]' : 'text-[#f23645]';
 
           return (
-            <button
+            <div
               key={id}
-              onClick={() => onSelect(sym)}
-              className={`grid w-full grid-cols-12 items-center border-b px-3 py-2 text-left font-mono text-[11px] transition ${
+              className={`group relative grid w-full grid-cols-12 items-center border-b px-3 py-2 text-left font-mono text-[11px] transition ${
                 isDark ? 'border-[#1a1e2a]' : 'border-[#f0f3fa]'
               } ${
                 isActive
@@ -74,19 +77,37 @@ export function WatchlistPanel({
                     : 'hover:bg-[#f4f6fb]'
               }`}
             >
-              <div className="col-span-5 overflow-hidden">
-                <div className={`truncate font-semibold ${isDark ? 'text-white' : 'text-[#131722]'}`}>
-                  {sym.ticker}
+              <button
+                onClick={() => onSelect(sym)}
+                className="col-span-12 grid grid-cols-12 items-center text-left"
+              >
+                <div className="col-span-5 overflow-hidden pr-1">
+                  <div className={`truncate font-semibold ${isDark ? 'text-white' : 'text-[#131722]'}`}>
+                    {sym.ticker}
+                  </div>
+                  <div className="truncate text-[9.5px] text-[#787b86]">{sym.exchange}</div>
                 </div>
-                <div className="truncate text-[9.5px] text-[#787b86]">{sym.exchange}</div>
-              </div>
-              <div className={`col-span-4 text-right ${isDark ? 'text-[#d1d4dc]' : 'text-[#131722]'}`}>
-                {q ? q.last.toFixed(sym.precision) : '—'}
-              </div>
-              <div className={`col-span-3 text-right ${q ? color : 'text-[#787b86]'}`}>
-                {q ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
-              </div>
-            </button>
+                <div className={`col-span-4 text-right ${isDark ? 'text-[#d1d4dc]' : 'text-[#131722]'}`}>
+                  {q ? q.last.toFixed(sym.precision) : '—'}
+                </div>
+                <div className={`col-span-3 text-right ${q ? color : 'text-[#787b86]'}`}>
+                  {q ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
+                </div>
+              </button>
+
+              {onRemove && symbolIds.length > 1 && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemove(id);
+                  }}
+                  title="Remove from Watchlist"
+                  className="absolute top-1/2 right-1 hidden -translate-y-1/2 rounded bg-[#131722]/90 px-1 text-[10px] text-[#f23645] hover:bg-[#f23645] hover:text-white group-hover:block"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           );
         })}
       </div>

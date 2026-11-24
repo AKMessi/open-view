@@ -1,7 +1,8 @@
 import { generateSyntheticBars } from '@openview/chart-engine';
-import { BinanceDirectDatafeed, findSymbolById } from '@openview/datafeed-sdk';
+import { BinanceDirectDatafeed, findSymbolById, searchCatalog } from '@openview/datafeed-sdk';
 import type {
   FeedQualityBadge,
+  MarketCategory,
   OHLCVBar,
   QuoteTick,
   Resolution,
@@ -257,7 +258,11 @@ export class MarketClient {
     const sym = findSymbolById(symbolId);
     if (!sym) return () => this.unsubscribeChart(sessionId);
 
-    if (sym.market === 'crypto' || sym.id.startsWith('BINANCE:')) {
+    if (
+      sym.market === 'crypto' ||
+      sym.id.startsWith('BINANCE:') ||
+      sym.id.startsWith('HYPERLIQUID:')
+    ) {
       void this.cryptoDirect
         .getBars({ symbol: sym, resolution, countBack: 500 })
         .then((res) => {
@@ -337,6 +342,43 @@ export class MarketClient {
     };
   }
 
+  async searchSymbols(
+    query: string,
+    market: MarketCategory | 'all' = 'all',
+    limit = 60,
+  ): Promise<{
+    symbols: SymbolInfo[];
+    totalCached?: number;
+    source: 'bridge_universal' | 'local_catalog';
+  }> {
+    if (this.state.mode === 'local_bridge') {
+      try {
+        const qs = new URLSearchParams({ q: query, market, limit: String(limit) });
+        const res = await fetch(`${BRIDGE_HTTP}/api/v1/symbols/search?${qs.toString()}`, {
+          credentials: 'include',
+          signal: AbortSignal.timeout(4000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            symbols: SymbolInfo[];
+            stats?: { totalCached: number };
+          };
+          return {
+            symbols: data.symbols,
+            ...(data.stats ? { totalCached: data.stats.totalCached } : {}),
+            source: 'bridge_universal',
+          };
+        }
+      } catch {
+        // fallback to local catalog
+      }
+    }
+    return {
+      symbols: searchCatalog(query, market, limit),
+      source: 'local_catalog',
+    };
+  }
+
   async listProviders(): Promise<ProviderStatusInfo[]> {
     if (!this.token) return [];
     const res = await fetch(`${BRIDGE_HTTP}/api/v1/vault/providers`, {
@@ -408,7 +450,11 @@ export class MarketClient {
 
     const sym = findSymbolById(symbolId);
     if (!sym) return null;
-    if (sym.market === 'crypto' || sym.id.startsWith('BINANCE:')) {
+    if (
+      sym.market === 'crypto' ||
+      sym.id.startsWith('BINANCE:') ||
+      sym.id.startsWith('HYPERLIQUID:')
+    ) {
       try {
         const res = await this.cryptoDirect.getBars({ symbol: sym, resolution, countBack: count });
         if (res.bars.length > 0) return { symbolInfo: sym, bars: res.bars };

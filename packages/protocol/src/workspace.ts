@@ -44,4 +44,5 @@ export interface WorkspaceSnapshot {
   syncTime: boolean;
   tiles: ChartTileState[];
   drawings: DrawingEntity[];
+  watchlist?: string[];
 }

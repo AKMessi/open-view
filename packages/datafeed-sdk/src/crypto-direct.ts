@@ -43,10 +43,15 @@ export class BinanceDirectDatafeed implements IDatafeed {
   }
 
   async getBars(req: HistoryRequest): Promise<HistoryResponse> {
-    const isPerp = req.symbol.segment === 'perps';
-    const rawTicker = req.symbol.ticker.replace(/\.P$/i, '').toUpperCase();
+    const isHyperliquid = req.symbol.id.startsWith('HYPERLIQUID:');
+    const isPerp = req.symbol.segment === 'perps' || isHyperliquid;
+    const rawTicker = req.symbol.ticker.replace(/(\.P|-PERP)$/i, '').toUpperCase();
     const interval = BINANCE_INTERVAL_MAP[req.resolution] ?? '15m';
     const limit = Math.min(1000, Math.max(10, req.countBack ?? 500));
+
+    if (isHyperliquid) {
+      return this.fetchHyperliquidFallback(rawTicker, interval, limit, req.to);
+    }
 
     const params = new URLSearchParams({
       symbol: rawTicker,
@@ -184,9 +189,63 @@ export class BinanceDirectDatafeed implements IDatafeed {
     resolution: Resolution,
     onBar: (bar: OHLCVBar, quality: FeedQualityBadge) => void,
   ): () => void {
+    const interval = BINANCE_INTERVAL_MAP[resolution] ?? '15m';
+
+    if (symbol.id.startsWith('HYPERLIQUID:')) {
+      const coin = symbol.ticker.replace(/-PERP$/i, '').toUpperCase();
+      let closed = false;
+      let ws: WebSocket | null = null;
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const connectHl = () => {
+        if (closed) return;
+        ws = new WebSocket('wss://api.hyperliquid.xyz/ws');
+        ws.onopen = () => {
+          ws?.send(
+            JSON.stringify({
+              method: 'subscribe',
+              subscription: { type: 'candle', coin, interval },
+            }),
+          );
+        };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(String(ev.data)) as {
+              channel?: string;
+              data?: { t: number; o: string; h: string; l: string; c: string; v: string };
+            };
+            if (msg.channel === 'candle' && msg.data) {
+              onBar(
+                {
+                  time: msg.data.t,
+                  open: Number(msg.data.o),
+                  high: Number(msg.data.h),
+                  low: Number(msg.data.l),
+                  close: Number(msg.data.c),
+                  volume: Number(msg.data.v),
+                },
+                'live_full_vol',
+              );
+            }
+          } catch {
+            // ignore
+          }
+        };
+        ws.onclose = () => {
+          if (!closed) retryTimer = setTimeout(connectHl, 2500);
+        };
+        ws.onerror = () => ws?.close();
+      };
+      connectHl();
+      return () => {
+        closed = true;
+        if (retryTimer) clearTimeout(retryTimer);
+        ws?.close();
+      };
+    }
+
     const isPerp = symbol.segment === 'perps';
     const rawTicker = symbol.ticker.replace(/\.P$/i, '').toLowerCase();
-    const interval = BINANCE_INTERVAL_MAP[resolution] ?? '15m';
     const wsUrl = isPerp
       ? `wss://fstream.binance.com/ws/${rawTicker}@kline_${interval}`
       : `wss://data-stream.binance.vision/ws/${rawTicker}@kline_${interval}`;
@@ -254,9 +313,67 @@ export class BinanceDirectDatafeed implements IDatafeed {
     const spotTickers = symbols
       .filter((s) => s.startsWith('BINANCE:') && !s.endsWith('.P'))
       .map((s) => s.slice('BINANCE:'.length).toUpperCase());
-    if (spotTickers.length === 0) return () => {};
+    const hlCoins = symbols
+      .filter((s) => s.startsWith('HYPERLIQUID:'))
+      .map((s) => ({
+        symbolId: s,
+        coin: s.slice('HYPERLIQUID:'.length).replace(/-PERP$/i, '').toUpperCase(),
+      }));
+
+    if (spotTickers.length === 0 && hlCoins.length === 0) return () => {};
 
     let closed = false;
+    let hlWs: WebSocket | null = null;
+    if (hlCoins.length > 0) {
+      const coinMap = new Map(hlCoins.map((c) => [c.coin, c.symbolId]));
+      const prevPx = new Map<string, number>();
+      const connectHl = () => {
+        if (closed) return;
+        hlWs = new WebSocket('wss://api.hyperliquid.xyz/ws');
+        hlWs.onopen = () => {
+          hlWs?.send(JSON.stringify({ method: 'subscribe', subscription: { type: 'allMids' } }));
+        };
+        hlWs.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(String(ev.data)) as {
+              channel?: string;
+              data?: { mids?: Record<string, string> };
+            };
+            const mids = msg.data?.mids;
+            if (msg.channel !== 'allMids' || !mids) return;
+            const now = Date.now();
+            for (const [coin, symbolId] of coinMap) {
+              const raw = mids[coin];
+              if (!raw) continue;
+              const last = Number(raw);
+              if (!Number.isFinite(last)) continue;
+              const open = prevPx.get(coin) ?? last;
+              if (!prevPx.has(coin)) prevPx.set(coin, last);
+              const change = last - open;
+              onQuote({
+                symbol: symbolId,
+                last,
+                change,
+                changePct: open > 0 ? (change / open) * 100 : 0,
+                timestamp: now,
+                feedQuality: 'live_full_vol',
+              });
+            }
+          } catch {
+            // ignore
+          }
+        };
+        hlWs.onerror = () => hlWs?.close();
+      };
+      connectHl();
+    }
+
+    if (spotTickers.length === 0) {
+      return () => {
+        closed = true;
+        hlWs?.close();
+      };
+    }
 
     // Immediate REST 24hr snapshot so prices populate in < 200ms before first WS tick
     const encoded = encodeURIComponent(JSON.stringify(spotTickers));
@@ -323,6 +440,7 @@ export class BinanceDirectDatafeed implements IDatafeed {
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
       ws?.close();
+      hlWs?.close();
     };
   }
 }

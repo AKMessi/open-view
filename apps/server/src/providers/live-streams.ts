@@ -12,23 +12,42 @@ const calendar = new SessionCalendar();
 
 export function toYahooSymbol(symbol: SymbolInfo): string {
   const t = symbol.ticker.toUpperCase();
+  if (symbol.id.startsWith('GLOBAL:')) {
+    return symbol.id.slice('GLOBAL:'.length);
+  }
+  if (symbol.id.startsWith('BSE:')) {
+    if (t === 'SENSEX') return '^BSESN';
+    return `${t}.BO`;
+  }
   if (symbol.calendarId === 'FOREX_OTC') {
     if (t === 'XAUUSD') return 'GC=F';
     if (t === 'XAGUSD') return 'SI=F';
+    if (t === 'USOIL') return 'CL=F';
+    if (t === 'UKOIL') return 'BZ=F';
+    if (t === 'NATGAS') return 'NG=F';
+    if (t === 'COPPER') return 'HG=F';
+    if (t === 'DXY') return 'DX-Y.NYB';
     return `${t}=X`;
   }
   if (symbol.calendarId === 'US_EQUITY') {
+    if (t === 'SPX') return '^GSPC';
+    if (t === 'NDX') return '^NDX';
+    if (t === 'VIX') return '^VIX';
     return t;
   }
   if (symbol.calendarId === 'MCX') {
     if (t.startsWith('GOLD')) return 'GC=F';
     if (t.startsWith('CRUDEOIL')) return 'CL=F';
     if (t.startsWith('SILVER')) return 'SI=F';
+    if (t.startsWith('NATURALGAS')) return 'NG=F';
+    if (t.startsWith('COPPER')) return 'HG=F';
     return `${t.replace(/1!$/, '')}.NS`;
   }
   // Indian NSE
   if (t === 'NIFTY' || t === 'NIFTY1!') return '^NSEI';
   if (t === 'BANKNIFTY' || t === 'BANKNIFTY1!') return '^NSEBANK';
+  if (t === 'FINNIFTY') return 'NIFTY_FIN_SERVICE.NS';
+  if (t === 'INDIAVIX') return '^INDIAVIX';
   return `${t.replace(/1!$/, '')}.NS`;
 }
 

@@ -183,7 +183,7 @@ export function App() {
   });
   const [telemetry, setTelemetry] = useState<FrameTelemetry | null>(null);
   const [quotes, setQuotes] = useState<Record<string, QuoteTick>>({});
-  const [watchlist] = useState<string[]>([...DEFAULT_WATCHLIST_IDS]);
+  const [watchlist, setWatchlist] = useState<string[]>(() => [...DEFAULT_WATCHLIST_IDS]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchSeed, setSearchSeed] = useState('');
   const [vaultOpen, setVaultOpen] = useState(false);
@@ -240,6 +240,9 @@ export function App() {
       if (ws.drawings.length > 0) {
         drawingManagerRef.current.loadDrawings(ws.drawings);
       }
+      if (ws.watchlist && ws.watchlist.length > 0) {
+        setWatchlist(ws.watchlist);
+      }
     });
   }, []);
 
@@ -257,12 +260,19 @@ export function App() {
         syncTime: false,
         tiles,
         drawings: drawingManagerRef.current.getAllDrawings(),
+        watchlist,
       };
       void saveWorkspaceLocal(snapshot);
       void clientRef.current?.syncWorkspaceToBridge(snapshot);
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [tiles, layoutGrid, syncCrosshair, syncInterval, theme, drawRev]);
+  }, [tiles, layoutGrid, syncCrosshair, syncInterval, theme, drawRev, watchlist]);
+
+  const toggleWatchlistSymbol = (symbolId: string) => {
+    setWatchlist((prev) =>
+      prev.includes(symbolId) ? prev.filter((id) => id !== symbolId) : [...prev, symbolId],
+    );
+  };
 
   useEffect(() => {
     const client = clientRef.current!;
@@ -273,12 +283,7 @@ export function App() {
       window.setTimeout(() => setAlertToast((cur) => (cur?.id === ev.id ? null : cur)), 5000);
     });
 
-    let unsubQuotes: (() => void) | null = null;
-    void client.connect().then(() => {
-      unsubQuotes = client.subscribeQuotes(watchlist, (q) => {
-        quoteBufferRef.current[q.symbol] = q;
-      });
-    });
+    void client.connect();
 
     const uiTimer = window.setInterval(() => {
       const buffered = quoteBufferRef.current;
@@ -290,12 +295,20 @@ export function App() {
 
     return () => {
       window.clearInterval(uiTimer);
-      unsubQuotes?.();
       unsubAlerts();
       unsubState();
       client.dispose();
     };
-  }, [watchlist]);
+  }, []);
+
+  // Re-subscribe live Watchlist quotes seamlessly whenever symbols are added/removed (zero WS reconnect!)
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client || bridge.mode === 'connecting' || watchlist.length === 0) return;
+    return client.subscribeQuotes(watchlist, (q) => {
+      quoteBufferRef.current[q.symbol] = q;
+    });
+  }, [watchlist, bridge.mode]);
 
   const updateActiveTile = (patch: Partial<ChartTileState>, applyToAll = false) => {
     setTiles((prev) =>
@@ -1018,6 +1031,7 @@ export function App() {
               if (replaySnap.active) replayClockRef.current.stop();
               updateActiveTile({ symbol: sym.id });
             }}
+            onRemove={(symId) => toggleWatchlistSymbol(symId)}
             onOpenSearch={() => {
               setSearchSeed('');
               setSearchOpen(true);
@@ -1038,8 +1052,11 @@ export function App() {
       <SymbolSearchModal
         open={searchOpen}
         initialQuery={searchSeed}
+        client={clientRef.current!}
+        watchlistIds={watchlist}
         spreadAlignment={spreadAlignment}
         onChangeSpreadAlignment={setSpreadAlignment}
+        onToggleWatchlist={toggleWatchlistSymbol}
         onClose={() => setSearchOpen(false)}
         onSelect={(sym) => {
           setLocalFileOverride(null);

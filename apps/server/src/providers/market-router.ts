@@ -195,8 +195,12 @@ export class MarketDataRouter {
       throw new Error(`Unknown symbol: ${symbolId}`);
     }
 
-    // 1. CRYPTO: Live Binance .vision / Hyperliquid / Coinbase failover
-    if (baseSym.market === 'crypto' || baseSym.id.startsWith('BINANCE:')) {
+    // 1. CRYPTO: Live Binance .vision / Hyperliquid Perps / Coinbase failover
+    if (
+      baseSym.market === 'crypto' ||
+      baseSym.id.startsWith('BINANCE:') ||
+      baseSym.id.startsWith('HYPERLIQUID:')
+    ) {
       const res = await this.cryptoDirect.getBars({
         symbol: baseSym,
         resolution,
@@ -430,7 +434,11 @@ export class MarketDataRouter {
   ): () => void {
     const sym = findSymbolById(symbolId);
     if (!sym) return () => {};
-    if (sym.market === 'crypto' || sym.id.startsWith('BINANCE:')) {
+    if (
+      sym.market === 'crypto' ||
+      sym.id.startsWith('BINANCE:') ||
+      sym.id.startsWith('HYPERLIQUID:')
+    ) {
       return this.cryptoDirect.subscribeBars(sym, resolution, onBar);
     }
 
@@ -589,9 +597,11 @@ export class MarketDataRouter {
   }
 
   subscribeLiveQuotes(symbols: string[], onQuote: (q: QuoteTick) => void): () => void {
-    const cryptoSyms = symbols.filter((s) => s.startsWith('BINANCE:'));
+    const cryptoSyms = symbols.filter(
+      (s) => s.startsWith('BINANCE:') || s.startsWith('HYPERLIQUID:'),
+    );
     const otherSyms = symbols
-      .filter((s) => !s.startsWith('BINANCE:'))
+      .filter((s) => !s.startsWith('BINANCE:') && !s.startsWith('HYPERLIQUID:'))
       .map((s) => findSymbolById(s))
       .filter((s): s is SymbolInfo => s !== null);
 
