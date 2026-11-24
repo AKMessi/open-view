@@ -154,7 +154,11 @@ export class DirtyScheduler {
   private rafId: number | null = null;
   private disposed = false;
 
-  constructor(private readonly onFrame: (mask: number) => void) {}
+  private readonly onFrame: (mask: number) => void;
+
+  constructor(onFrame: (mask: number) => void) {
+    this.onFrame = onFrame;
+  }
 
   invalidate(flag: DirtyFlag): void {
     if (this.disposed) return;
@@ -214,10 +218,12 @@ export class TileCanvasPair {
     verticalPixelRatio: 1,
   };
 
-  constructor(
-    private readonly container: HTMLElement,
-    private readonly onResize: (metrics: CanvasMetrics) => void,
-  ) {
+  private readonly container: HTMLElement;
+  private readonly onResize: (metrics: CanvasMetrics) => void;
+
+  constructor(container: HTMLElement, onResize: (metrics: CanvasMetrics) => void) {
+    this.container = container;
+    this.onResize = onResize;
     container.style.position = container.style.position || 'relative';
     container.style.overflow = 'hidden';
     container.style.userSelect = 'none';

@@ -10,8 +10,11 @@ export interface UndoableCommand {
 export class UndoModel {
   private readonly undoStack: UndoableCommand[] = [];
   private readonly redoStack: UndoableCommand[] = [];
+  private readonly maxDepth: number;
 
-  constructor(private readonly maxDepth = 200) {}
+  constructor(maxDepth = 200) {
+    this.maxDepth = maxDepth;
+  }
 
   get canUndo(): boolean {
     return this.undoStack.length > 0;

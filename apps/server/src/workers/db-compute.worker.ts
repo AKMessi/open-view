@@ -36,7 +36,12 @@ type WorkerRequest =
       beforeTime?: number;
       limit: number;
     }
-  | { id: number; op: 'bars.invalidate'; symbol: string };
+  | { id: number; op: 'bars.invalidate'; symbol: string }
+  | { id: number; op: 'alerts.upsert'; alertId: string; symbol: string; ruleJson: string; enabled: number; createdAt: number }
+  | { id: number; op: 'alerts.list' }
+  | { id: number; op: 'alerts.delete'; alertId: string }
+  | { id: number; op: 'alertEvents.append'; eventId: string; alertId: string; symbol: string; eventJson: string; triggeredAt: number }
+  | { id: number; op: 'alertEvents.list'; limit: number };
 
 const init = workerData as WorkerInitData;
 if (init.dbPath !== ':memory:') {
@@ -91,6 +96,14 @@ db.exec(`
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS alert_events (
+    id TEXT PRIMARY KEY,
+    alert_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    triggered_at INTEGER NOT NULL
+  );
 `);
 
 const stmtVaultPut = db.prepare(
@@ -116,6 +129,18 @@ const stmtBarsBefore = db.prepare(
   'SELECT bar_time AS time, open, high, low, close, volume FROM bars_cache WHERE symbol = ? AND resolution = ? AND bar_time < ? ORDER BY bar_time DESC LIMIT ?',
 );
 const stmtBarsInvalidate = db.prepare('DELETE FROM bars_cache WHERE symbol = ?');
+
+const stmtAlertUpsert = db.prepare(
+  'INSERT INTO alerts (id, symbol, rule_json, enabled, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET symbol=excluded.symbol, rule_json=excluded.rule_json, enabled=excluded.enabled',
+);
+const stmtAlertList = db.prepare('SELECT id, symbol, rule_json, enabled, created_at FROM alerts ORDER BY created_at DESC');
+const stmtAlertDelete = db.prepare('DELETE FROM alerts WHERE id = ?');
+const stmtAlertEventInsert = db.prepare(
+  'INSERT OR REPLACE INTO alert_events (id, alert_id, symbol, event_json, triggered_at) VALUES (?, ?, ?, ?, ?)',
+);
+const stmtAlertEventList = db.prepare(
+  'SELECT id, alert_id, symbol, event_json, triggered_at FROM alert_events ORDER BY triggered_at DESC LIMIT ?',
+);
 
 const port = parentPort;
 
@@ -187,6 +212,24 @@ port.on('message', (req: WorkerRequest) => {
       case 'bars.invalidate':
         stmtBarsInvalidate.run(req.symbol);
         result = { ok: true };
+        break;
+      case 'alerts.upsert':
+        stmtAlertUpsert.run(req.alertId, req.symbol, req.ruleJson, req.enabled, req.createdAt);
+        result = { ok: true };
+        break;
+      case 'alerts.list':
+        result = stmtAlertList.all();
+        break;
+      case 'alerts.delete':
+        stmtAlertDelete.run(req.alertId);
+        result = { ok: true };
+        break;
+      case 'alertEvents.append':
+        stmtAlertEventInsert.run(req.eventId, req.alertId, req.symbol, req.eventJson, req.triggeredAt);
+        result = { ok: true };
+        break;
+      case 'alertEvents.list':
+        result = stmtAlertEventList.all(req.limit);
         break;
     }
     port.postMessage({ id: req.id, ok: true, result });

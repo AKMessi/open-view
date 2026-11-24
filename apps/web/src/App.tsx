@@ -33,11 +33,16 @@ import { PINE_TEMPLATES } from '@openview/script-runtime';
 import { IndicatorPickerModal } from './modals/IndicatorPickerModal.tsx';
 import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
 import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
+import { AlertsPanel } from './panels/AlertsPanel.tsx';
 import { DomLadderPanel } from './panels/DomLadderPanel.tsx';
 import { ObjectTreePanel } from './panels/ObjectTreePanel.tsx';
 import { OrderTicketPanel } from './panels/OrderTicketPanel.tsx';
 import { WatchlistPanel } from './panels/WatchlistPanel.tsx';
-import { MarketClient, type BridgeConnectionState } from './services/market-client.ts';
+import {
+  MarketClient,
+  type AlertTriggerEventClient,
+  type BridgeConnectionState,
+} from './services/market-client.ts';
 import { loadWorkspaceLocal, saveWorkspaceLocal } from './storage/workspace-store.ts';
 import { ChartTile } from './workbench/ChartTile.tsx';
 import { LeftDrawingToolbar } from './workbench/LeftDrawingToolbar.tsx';
@@ -48,6 +53,7 @@ import { WorkspaceSyncBus } from './workbench/sync-bus.ts';
 const ScriptDrawer = lazy(() => import('./lazy/ScriptDrawer.tsx'));
 const StrategyTesterDrawer = lazy(() => import('./lazy/StrategyTesterDrawer.tsx'));
 const OptionChainDrawer = lazy(() => import('./lazy/OptionChainDrawer.tsx'));
+const ScreenerDrawer = lazy(() => import('./lazy/ScreenerDrawer.tsx'));
 
 type LayoutGrid = WorkspaceSnapshot['layoutGrid'];
 
@@ -130,7 +136,9 @@ export function App() {
   const [paperAccount, setPaperAccount] = useState<PaperAccountSnapshot>(() =>
     paperBrokerRef.current.getSnapshot(),
   );
-  const [bottomDrawer, setBottomDrawer] = useState<'none' | 'script' | 'backtest' | 'options'>('none');
+  const [bottomDrawer, setBottomDrawer] = useState<'none' | 'script' | 'backtest' | 'options' | 'screener'>('none');
+  const [liveAlertEvents, setLiveAlertEvents] = useState<AlertTriggerEventClient[]>([]);
+  const [alertToast, setAlertToast] = useState<AlertTriggerEventClient | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quoteBufferRef = useRef<Record<string, QuoteTick>>({});
 
@@ -162,7 +170,7 @@ export function App() {
   const [replaySnap, setReplaySnap] = useState<ReplaySnapshot>(() => replayClockRef.current.getSnapshot());
   const [replayTickNonce, setReplayTickNonce] = useState(0);
 
-  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'trade' | 'dom' | 'none'>('watchlist');
+  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'trade' | 'dom' | 'alerts' | 'none'>('watchlist');
   const [chartMode, setChartMode] = useState<NonTimeChartMode>('standard');
   const [showVrvp, setShowVrvp] = useState(false);
   const [showFootprint, setShowFootprint] = useState(false);
@@ -259,6 +267,11 @@ export function App() {
   useEffect(() => {
     const client = clientRef.current!;
     const unsubState = client.onConnectionChange(setBridge);
+    const unsubAlerts = client.onAlertTriggered((ev) => {
+      setLiveAlertEvents((prev) => [ev, ...prev].slice(0, 50));
+      setAlertToast(ev);
+      window.setTimeout(() => setAlertToast((cur) => (cur?.id === ev.id ? null : cur)), 5000);
+    });
 
     let unsubQuotes: (() => void) | null = null;
     void client.connect().then(() => {
@@ -278,6 +291,7 @@ export function App() {
     return () => {
       window.clearInterval(uiTimer);
       unsubQuotes?.();
+      unsubAlerts();
       unsubState();
       client.dispose();
     };
@@ -629,6 +643,17 @@ export function App() {
             Options
           </button>
 
+          <button
+            onClick={() => setBottomDrawer((d) => (d === 'screener' ? 'none' : 'screener'))}
+            className={`rounded px-2 py-1 text-[11px] font-medium ${
+              bottomDrawer === 'screener'
+                ? 'bg-[#26c6da]/25 text-[#4dd0e1]'
+                : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+            }`}
+          >
+            Screener
+          </button>
+
           <div className="h-4 w-px bg-[#2a2e39]" />
 
           <div className="flex items-center gap-0.5">
@@ -747,6 +772,15 @@ export function App() {
             title="L2 Depth of Market Ladder"
           >
             DOM
+          </button>
+          <button
+            onClick={() => setRightTab((t) => (t === 'alerts' ? 'none' : 'alerts'))}
+            className={`rounded border border-[#2a2e39] px-1.5 py-1 text-[10.5px] ${
+              rightTab === 'alerts' ? 'bg-[#f7931a] text-white' : 'text-[#868993]'
+            }`}
+            title="24/7 Server Alerts & SSRF-Guarded Webhooks"
+          >
+            🔔
           </button>
           <span
             className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
@@ -923,7 +957,35 @@ export function App() {
               />
             </Suspense>
           )}
+
+          {bottomDrawer === 'screener' && (
+            <Suspense fallback={<div className="h-72 border-t border-[#2a2e39] bg-[#131722] p-4 text-xs text-[#787b86]">Loading Multi-Market Screener...</div>}>
+              <ScreenerDrawer
+                open
+                client={clientRef.current!}
+                isDark={isDark}
+                onSelectSymbol={(symId) => {
+                  setLocalFileOverride(null);
+                  setStress250k(false);
+                  if (replaySnap.active) replayClockRef.current.stop();
+                  updateActiveTile({ symbol: symId });
+                }}
+                onClose={() => setBottomDrawer('none')}
+              />
+            </Suspense>
+          )}
         </div>
+
+        {rightTab === 'alerts' && (
+          <AlertsPanel
+            symbol={activeMeta.info}
+            latestBar={latestActiveBar}
+            client={clientRef.current!}
+            bridgeOnline={bridge.mode === 'local_bridge'}
+            liveEvents={liveAlertEvents}
+            isDark={isDark}
+          />
+        )}
 
         {rightTab === 'trade' && (
           <OrderTicketPanel
@@ -1007,6 +1069,15 @@ export function App() {
         onClose={() => setVaultOpen(false)}
         onUpdated={() => setReloadNonce((n) => n + 1)}
       />
+
+      {alertToast && (
+        <div className="fixed right-4 bottom-4 z-50 rounded-md border border-[#f7931a] bg-[#131722] px-4 py-2.5 text-xs shadow-2xl">
+          <div className="font-mono font-bold text-[#f7931a]">🔔 {alertToast.alertName}</div>
+          <div className="text-[#d1d4dc]">
+            {alertToast.symbol} @ {alertToast.price} — {alertToast.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

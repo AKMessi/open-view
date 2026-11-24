@@ -116,11 +116,12 @@ export class PassphraseRamSealer implements IMasterKeySealer {
 export class CredentialVault {
   private masterKey: Buffer | null = null;
   private readonly sealerMode: 'windows_dpapi' | 'ram_passphrase';
+  private readonly keyFilePath: string;
+  private readonly sealer: IMasterKeySealer;
 
-  constructor(
-    private readonly keyFilePath: string,
-    private readonly sealer: IMasterKeySealer,
-  ) {
+  constructor(keyFilePath: string, sealer: IMasterKeySealer) {
+    this.keyFilePath = keyFilePath;
+    this.sealer = sealer;
     this.sealerMode = sealer.mode;
   }
 

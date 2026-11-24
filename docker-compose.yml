@@ -1,0 +1,20 @@
+services:
+  openview:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openview-workbench
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+    environment:
+      - OPENVIEW_HOST=0.0.0.0
+      - OPENVIEW_PORT=4001
+      - OPENVIEW_BRIDGE_MODE=self_hosted
+      # Provide a strong passphrase for AES-256-GCM Credential Vault sealing inside Linux Docker:
+      - OPENVIEW_VAULT_PASSPHRASE=${OPENVIEW_VAULT_PASSPHRASE:-change-me-in-production}
+    volumes:
+      - openview_data:/app/.data
+
+volumes:
+  openview_data:

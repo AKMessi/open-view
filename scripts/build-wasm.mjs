@@ -67,12 +67,14 @@ function main() {
     { cwd: ROOT, stdio: 'inherit' },
   );
 
-  console.log('[build-wasm] Generating Node ESM bindings -> apps/server/src/wasm-pkg');
+  console.log('[build-wasm] Generating Node bindings -> apps/server/src/wasm-pkg');
   execFileSync(
     WASM_BINDGEN_BIN,
     ['--target', 'nodejs', '--out-dir', NODE_OUT_DIR, WASM_OUTPUT],
     { cwd: ROOT, stdio: 'inherit' },
   );
+  // Ensure Node treats wasm-bindgen's CJS output cleanly inside an "type": "module" workspace
+  fs.writeFileSync(path.join(NODE_OUT_DIR, 'package.json'), '{"type":"commonjs"}\n', 'utf8');
 
   const wasmSizeKb = (fs.statSync(path.join(WEB_OUT_DIR, 'openview_wasm_bg.wasm')).size / 1024).toFixed(1);
   console.log(`[build-wasm] Done! openview_wasm_bg.wasm = ${wasmSizeKb} KB`);

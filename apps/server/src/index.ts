@@ -3,8 +3,9 @@ import { createBridgeServer } from './app.ts';
 const host = process.env.OPENVIEW_HOST ?? '127.0.0.1';
 const port = Number(process.env.OPENVIEW_PORT ?? '4001');
 const webPort = Number(process.env.OPENVIEW_WEB_PORT ?? '5173');
+const bridgeMode = process.env.OPENVIEW_BRIDGE_MODE === 'self_hosted' ? 'self_hosted' : 'local';
 
-const bridge = await createBridgeServer({ host, port, webPort });
+const bridge = await createBridgeServer({ host, port, webPort, bridgeMode });
 
 console.log(
   `[openview-bridge] Listening on ${bridge.url} (WS: ${bridge.wsUrl}, vault: ${bridge.vault.mode})`,

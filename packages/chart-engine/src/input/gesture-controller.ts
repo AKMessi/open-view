@@ -37,10 +37,12 @@ export class GestureController {
   private activePointers = new Map<number, { x: number; y: number }>();
   private lastPinchDist: number | null = null;
 
-  constructor(
-    private readonly el: HTMLElement,
-    private readonly cb: GestureCallbacks,
-  ) {
+  private readonly el: HTMLElement;
+  private readonly cb: GestureCallbacks;
+
+  constructor(el: HTMLElement, cb: GestureCallbacks) {
+    this.el = el;
+    this.cb = cb;
     this.el.addEventListener('pointerdown', this.handlePointerDown);
     window.addEventListener('pointermove', this.handlePointerMove);
     window.addEventListener('pointerup', this.handlePointerUp);

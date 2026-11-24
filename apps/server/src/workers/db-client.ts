@@ -134,6 +134,49 @@ export class DbWorkerClient {
     return this.call({ op: 'bars.invalidate', symbol });
   }
 
+  upsertAlert(
+    alertId: string,
+    symbol: string,
+    ruleJson: string,
+    enabled: boolean,
+    createdAt: number,
+  ): Promise<{ ok: boolean }> {
+    return this.call({
+      op: 'alerts.upsert',
+      alertId,
+      symbol,
+      ruleJson,
+      enabled: enabled ? 1 : 0,
+      createdAt,
+    });
+  }
+
+  listAlerts(): Promise<
+    Array<{ id: string; symbol: string; rule_json: string; enabled: number; created_at: number }>
+  > {
+    return this.call({ op: 'alerts.list' });
+  }
+
+  deleteAlert(alertId: string): Promise<{ ok: boolean }> {
+    return this.call({ op: 'alerts.delete', alertId });
+  }
+
+  appendAlertEvent(
+    eventId: string,
+    alertId: string,
+    symbol: string,
+    eventJson: string,
+    triggeredAt: number,
+  ): Promise<{ ok: boolean }> {
+    return this.call({ op: 'alertEvents.append', eventId, alertId, symbol, eventJson, triggeredAt });
+  }
+
+  listAlertEvents(
+    limit = 50,
+  ): Promise<Array<{ id: string; alert_id: string; symbol: string; event_json: string; triggered_at: number }>> {
+    return this.call({ op: 'alertEvents.list', limit });
+  }
+
   async close(): Promise<void> {
     await this.worker.terminate();
   }

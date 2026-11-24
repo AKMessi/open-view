@@ -1,11 +1,12 @@
 export class TokenBucketRateLimiter {
   private tokens: number;
   private lastRefillMs: number;
+  private readonly capacity: number;
+  private readonly refillIntervalMs: number;
 
-  constructor(
-    private readonly capacity: number,
-    private readonly refillIntervalMs: number,
-  ) {
+  constructor(capacity: number, refillIntervalMs: number) {
+    this.capacity = capacity;
+    this.refillIntervalMs = refillIntervalMs;
     this.tokens = capacity;
     this.lastRefillMs = Date.now();
   }

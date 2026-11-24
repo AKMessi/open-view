@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
+    "@openview/broker-sdk": "0.1.0",
     "@openview/chart-engine": "0.1.0",
     "@openview/datafeed-sdk": "0.1.0",
     "@openview/protocol": "0.1.0",

@@ -30,6 +30,55 @@ export interface BridgeConnectionState {
   wsRttMs?: number;
 }
 
+export interface AlertRuleClient {
+  id: string;
+  name: string;
+  symbol: string;
+  resolution: string;
+  kind: 'price' | 'trendline' | 'indicator';
+  operator: 'crossing' | 'crossing_up' | 'crossing_down' | 'greater_than' | 'less_than';
+  frequency: 'only_once' | 'once_per_bar' | 'once_per_bar_close';
+  enabled: boolean;
+  targetPrice?: number;
+  webhookUrl?: string;
+  webhookFormat?: 'generic' | 'discord' | 'telegram';
+  message: string;
+  createdAt: number;
+  triggerCount: number;
+}
+
+export interface AlertTriggerEventClient {
+  id: string;
+  alertId: string;
+  alertName: string;
+  symbol: string;
+  price: number;
+  thresholdPrice: number;
+  message: string;
+  triggeredAt: number;
+}
+
+export interface ScreenerRowClient {
+  symbol: string;
+  ticker: string;
+  description: string;
+  exchange: string;
+  market: string;
+  currency: string;
+  last: number;
+  changePct: number;
+  volume: number;
+  rsi14: number;
+  ema20: number;
+  ema50: number;
+  emaSignal: 'bullish' | 'bearish';
+  supertrendDir: 1 | -1;
+  atrPct: number;
+  bbWidthPct: number;
+  feedQuality: FeedQualityBadge;
+  updatedAt: number;
+}
+
 export interface ChartSubscriptionHandlers {
   onSnapshot: (info: SymbolInfo, bars: OHLCVBar[], noMoreHistory: boolean, providerLabel: string) => void;
   onBarUpdate: (bar: OHLCVBar, quality: FeedQualityBadge) => void;
@@ -52,6 +101,7 @@ export class MarketClient {
   private readonly chartHandlers = new Map<string, ChartSubscriptionHandlers>();
   private readonly directChartUnsubs = new Map<string, () => void>();
   private readonly quoteListeners = new Set<(q: QuoteTick) => void>();
+  private readonly alertListeners = new Set<(ev: AlertTriggerEventClient) => void>();
   private directQuoteUnsub: (() => void) | null = null;
   private activeQuoteSymbols: string[] = [];
 
@@ -153,6 +203,20 @@ export class MarketClient {
       }
       case 'quote.update': {
         for (const fn of this.quoteListeners) fn(msg.quote);
+        break;
+      }
+      case 'alert.triggered': {
+        const ev: AlertTriggerEventClient = {
+          id: `${msg.alertId}-${msg.triggeredAt}`,
+          alertId: msg.alertId,
+          alertName: msg.alertName,
+          symbol: msg.symbol,
+          price: msg.price,
+          thresholdPrice: msg.thresholdPrice,
+          message: msg.message,
+          triggeredAt: msg.triggeredAt,
+        };
+        for (const fn of this.alertListeners) fn(ev);
         break;
       }
     }
@@ -343,6 +407,85 @@ export class MarketClient {
       }
     }
     return { symbolInfo: sym, bars: generateSyntheticBars(sym, resolution, count, sym.id.length * 19) };
+  }
+
+  onAlertTriggered(fn: (ev: AlertTriggerEventClient) => void): () => void {
+    this.alertListeners.add(fn);
+    return () => this.alertListeners.delete(fn);
+  }
+
+  async listAlerts(): Promise<AlertRuleClient[]> {
+    if (!this.token) return [];
+    const res = await fetch(`${BRIDGE_HTTP}/api/v1/alerts`, {
+      credentials: 'include',
+      headers: { 'x-openview-token': this.token },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { alerts: AlertRuleClient[] };
+    return data.alerts;
+  }
+
+  async createAlert(payload: Omit<AlertRuleClient, 'id' | 'enabled' | 'createdAt' | 'triggerCount'>): Promise<boolean> {
+    if (!this.token) return false;
+    const res = await fetch(`${BRIDGE_HTTP}/api/v1/alerts`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'x-openview-token': this.token },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  }
+
+  async deleteAlert(id: string): Promise<boolean> {
+    if (!this.token) return false;
+    const res = await fetch(`${BRIDGE_HTTP}/api/v1/alerts/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: { 'x-openview-token': this.token },
+    });
+    return res.ok;
+  }
+
+  async listAlertEvents(): Promise<AlertTriggerEventClient[]> {
+    if (!this.token) return [];
+    const res = await fetch(`${BRIDGE_HTTP}/api/v1/alerts/events`, {
+      credentials: 'include',
+      headers: { 'x-openview-token': this.token },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { events: AlertTriggerEventClient[] };
+    return data.events;
+  }
+
+  async queryScreener(params: {
+    market?: string;
+    minRsi?: number;
+    maxRsi?: number;
+    emaSignal?: string;
+    supertrend?: string;
+    sortBy?: string;
+    sortDir?: string;
+    refresh?: boolean;
+  }): Promise<{ rows: ScreenerRowClient[]; scannedCount: number; elapsedMs: number; cached: boolean }> {
+    if (this.token) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== '') qs.set(k, String(v));
+      }
+      const res = await fetch(`${BRIDGE_HTTP}/api/v1/screener?${qs.toString()}`, {
+        credentials: 'include',
+        headers: { 'x-openview-token': this.token },
+      });
+      if (res.ok) {
+        return (await res.json()) as {
+          rows: ScreenerRowClient[];
+          scannedCount: number;
+          elapsedMs: number;
+          cached: boolean;
+        };
+      }
+    }
+    return { rows: [], scannedCount: 0, elapsedMs: 0, cached: false };
   }
 
   dispose(): void {

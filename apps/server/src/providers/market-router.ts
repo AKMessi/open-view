@@ -150,10 +150,13 @@ export class MarketDataRouter {
     ['fyers', new TokenBucketRateLimiter(10, 1_000)],
   ]);
 
-  constructor(
-    private readonly db: DbWorkerClient,
-    private readonly vault: CredentialVault,
-  ) {}
+  private readonly db: DbWorkerClient;
+  private readonly vault: CredentialVault;
+
+  constructor(db: DbWorkerClient, vault: CredentialVault) {
+    this.db = db;
+    this.vault = vault;
+  }
 
   private async getProviderCreds(provider: ProviderId): Promise<Record<string, string> | null> {
     const row = await this.db.getVaultSecret(provider);

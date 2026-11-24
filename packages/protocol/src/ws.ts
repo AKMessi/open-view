@@ -70,6 +70,16 @@ export type WsServerMessage =
       status: 'connected' | 'reconnecting' | 'degraded' | 'offline' | 'auth_expired';
       message?: string;
     }
+  | {
+      type: 'alert.triggered';
+      alertId: string;
+      alertName: string;
+      symbol: string;
+      price: number;
+      thresholdPrice: number;
+      message: string;
+      triggeredAt: number;
+    }
   | { type: 'error'; code: string; message: string; sessionId?: string };
 
 export function parseWsClientMessage(raw: string): WsClientMessage | null {
