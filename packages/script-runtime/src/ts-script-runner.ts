@@ -10,6 +10,123 @@ export interface CustomScriptResult {
   error?: string;
 }
 
+export const PINE_TEMPLATES: Record<string, { title: string; code: string }> = {
+  pine_ema_cross: {
+    title: 'Pine v6: Dual EMA Crossover',
+    code: `//@version=6
+indicator("Dual EMA Crossover", overlay=true)
+fast = ta.ema(close, 9)
+slow = ta.ema(close, 21)
+plot(fast, title="EMA 9", color=color.green, linewidth=2)
+plot(slow, title="EMA 21", color=color.red, linewidth=2)`,
+  },
+  pine_rsi_osc: {
+    title: 'Pine v6: RSI(14) + EMA(9) Signal',
+    code: `//@version=6
+indicator("RSI + Signal", overlay=false)
+r = ta.rsi(close, 14)
+sig = ta.ema(r, 9)
+hline(70, title="Overbought", color=color.red)
+hline(30, title="Oversold", color=color.green)
+plot(r, title="RSI 14", color=color.purple, linewidth=2)
+plot(sig, title="Signal 9", color=color.orange)`,
+  },
+  pine_mid_channel: {
+    title: 'Pine v6: Donchian Midline + History [1]',
+    code: `//@version=6
+indicator("Donchian Midline", overlay=true)
+hi = ta.highest(high, 20)
+lo = ta.lowest(low, 20)
+mid = (hi + lo) / 2
+plot(hi[1], title="Prev 20 High", color=color.green)
+plot(mid, title="Midline", color=color.blue, linewidth=2)
+plot(lo[1], title="Prev 20 Low", color=color.red)`,
+  },
+};
+
+export function runPineScript(
+  source: string,
+  bars: readonly OHLCVBar[],
+  wasm: WasmRuntimeApi,
+): CustomScriptResult {
+  const t0 = performance.now();
+  const n = bars.length;
+  const o = new Float64Array(n);
+  const h = new Float64Array(n);
+  const l = new Float64Array(n);
+  const c = new Float64Array(n);
+  const v = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = bars[i]!;
+    o[i] = b.open;
+    h[i] = b.high;
+    l[i] = b.low;
+    c[i] = b.close;
+    v[i] = b.volume;
+  }
+
+  const parsed = JSON.parse(wasm.evalPineJson(source, o, h, l, c, v)) as {
+    overlay: boolean;
+    title: string;
+    plots: Array<{ title: string; color: string; lineWidth: number; values: Array<number | null> }>;
+    hlines: Array<{ price: number; title: string; color: string }>;
+    diagnostics: Array<{ line: number; severity: string; message: string }>;
+    error: string | null;
+  };
+
+  const logs = parsed.diagnostics.map((d) => `[L${d.line} ${d.severity.toUpperCase()}] ${d.message}`);
+  if (parsed.error) {
+    return {
+      overlays: [],
+      subPanePlots: [],
+      logs,
+      elapsedMs: Number((performance.now() - t0).toFixed(2)),
+      error: parsed.error,
+    };
+  }
+
+  const overlays: MainOverlayPlot[] = [];
+  const subPanePlots: SubPaneSeriesPlot[] = [];
+  const refLines = parsed.hlines.map((hl) => hl.price);
+
+  for (let idx = 0; idx < parsed.plots.length; idx++) {
+    const p = parsed.plots[idx]!;
+    const arr = new Float64Array(p.values.length);
+    for (let i = 0; i < p.values.length; i++) {
+      arr[i] = p.values[i] === null ? Number.NaN : p.values[i]!;
+    }
+    if (parsed.overlay) {
+      overlays.push({
+        id: `pine_ov_${idx}`,
+        title: p.title,
+        kind: 'line',
+        color: p.color,
+        lineWidth: p.lineWidth,
+        startBarIndex: 0,
+        values: arr,
+      });
+    } else {
+      subPanePlots.push({
+        id: `pine_sub_${idx}`,
+        title: p.title,
+        color: p.color,
+        kind: 'line',
+        startBarIndex: 0,
+        values: arr,
+        ...(idx === 0 && refLines.length > 0 ? { refLines } : {}),
+      });
+    }
+  }
+
+  logs.unshift(`Pine VM compiled & evaluated "${parsed.title}" (${parsed.plots.length} plot(s))`);
+  return {
+    overlays,
+    subPanePlots,
+    logs,
+    elapsedMs: Number((performance.now() - t0).toFixed(2)),
+  };
+}
+
 export const SCRIPT_TEMPLATES: Record<string, { title: string; code: string }> = {
   ema_ribbon: {
     title: 'Dual EMA Momentum Ribbon',

@@ -33,6 +33,14 @@ export interface WasmRuntimeApi {
     slippageBps: number,
     initialCapital: number,
   ) => string;
+  evalPineJson: (
+    source: string,
+    open: Float64Array,
+    high: Float64Array,
+    low: Float64Array,
+    close: Float64Array,
+    volume: Float64Array,
+  ) => string;
 }
 
 let cachedPromise: Promise<WasmRuntimeApi> | null = null;
@@ -65,6 +73,7 @@ export function loadBrowserWasm(): Promise<WasmRuntimeApi> {
         taSessionVwap: (h, l, c, vol, b) => mod.ta_session_vwap(h, l, c, vol, b),
         runBacktestJson: (o, h, l, c, sid, pa, pb, sl, tp, fee, slip, cap) =>
           mod.backtest_run_json(o, h, l, c, sid, pa, pb, sl, tp, fee, slip, cap),
+        evalPineJson: (src, o, h, l, c, v) => mod.pine_eval_json(src, o, h, l, c, v),
       };
     })();
   }

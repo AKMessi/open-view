@@ -24,7 +24,7 @@ import type {
   WorkspaceSnapshot,
 } from '@openview/protocol';
 import { MasterReplayClock, type ReplaySnapshot } from '@openview/replay-engine';
-import { SCRIPT_TEMPLATES } from '@openview/script-runtime';
+import { PINE_TEMPLATES } from '@openview/script-runtime';
 import { IndicatorPickerModal } from './modals/IndicatorPickerModal.tsx';
 import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
 import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
@@ -144,8 +144,8 @@ export function App() {
   const [activeIndicatorIds, setActiveIndicatorIds] = useState<string[]>(['ema20', 'rsi14']);
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false);
 
-  // Lazy Script Drawer state
-  const [scriptDraftCode, setScriptDraftCode] = useState(SCRIPT_TEMPLATES.ema_ribbon!.code);
+  // Lazy Script Drawer state (defaults to Pine v6 Dual EMA)
+  const [scriptDraftCode, setScriptDraftCode] = useState(PINE_TEMPLATES.pine_ema_cross!.code);
   const [activeScriptCode, setActiveScriptCode] = useState<string | null>(null);
   const [scriptRunNonce, setScriptRunNonce] = useState(0);
   const [scriptLogs, setScriptLogs] = useState<string[]>([]);

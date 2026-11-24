@@ -13,6 +13,7 @@ import {
   computeBuiltinIndicators,
   loadBrowserWasm,
   runCustomIndicatorScript,
+  runPineScript,
 } from '@openview/script-runtime';
 import type { MarketClient } from '../services/market-client.ts';
 import type { WorkspaceSyncBus } from './sync-bus.ts';
@@ -246,7 +247,12 @@ export function ChartTile({
         const subPanes = [...computed.subPanes];
 
         if (customScriptCode && isActive) {
-          const customRes = runCustomIndicatorScript(customScriptCode, bars, wasm);
+          const isPine =
+            customScriptCode.includes('//@version=') ||
+            /\b(indicator|strategy)\s*\(/.test(customScriptCode);
+          const customRes = isPine
+            ? runPineScript(customScriptCode, bars, wasm)
+            : runCustomIndicatorScript(customScriptCode, bars, wasm);
           overlays.push(...customRes.overlays);
           if (customRes.subPanePlots.length > 0) {
             subPanes.push({ paneId: 'custom_script', plots: customRes.subPanePlots });

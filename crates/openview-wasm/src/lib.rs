@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 
 pub mod arena;
 pub mod backtester;
+pub mod pine;
 pub mod ta;
 
 pub use arena::BarArena;
@@ -254,5 +255,82 @@ pub fn backtest_run_json(
         s.total_fees,
         eq_str,
         pnl_str,
+    )
+}
+
+fn escape_json_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "")
+}
+
+/// Evaluates a Pine v5/v6-compatible script in Rust/WASM and returns JSON with
+/// overlay flag, plots, hlines, static repainting linter diagnostics, and errors.
+#[wasm_bindgen]
+pub fn pine_eval_json(
+    source: &str,
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> String {
+    let res = pine::eval_pine_script(source, open, high, low, close, volume);
+    let mut plots_json = String::from("[");
+    for (pi, p) in res.plots.iter().enumerate() {
+        if pi > 0 { plots_json.push(','); }
+        plots_json.push_str(&format!(
+            "{{\"title\":\"{}\",\"color\":\"{}\",\"lineWidth\":{},\"values\":[",
+            escape_json_str(&p.title),
+            escape_json_str(&p.color),
+            p.line_width
+        ));
+        for (vi, &v) in p.values.iter().enumerate() {
+            if vi > 0 { plots_json.push(','); }
+            if v.is_nan() || v.is_infinite() {
+                plots_json.push_str("null");
+            } else {
+                plots_json.push_str(&format!("{:.6}", v));
+            }
+        }
+        plots_json.push_str("]}");
+    }
+    plots_json.push(']');
+
+    let mut hlines_json = String::from("[");
+    for (hi, h) in res.hlines.iter().enumerate() {
+        if hi > 0 { hlines_json.push(','); }
+        hlines_json.push_str(&format!(
+            "{{\"price\":{},\"title\":\"{}\",\"color\":\"{}\"}}",
+            h.price,
+            escape_json_str(&h.title),
+            escape_json_str(&h.color)
+        ));
+    }
+    hlines_json.push(']');
+
+    let mut diags_json = String::from("[");
+    for (di, d) in res.diagnostics.iter().enumerate() {
+        if di > 0 { diags_json.push(','); }
+        diags_json.push_str(&format!(
+            "{{\"line\":{},\"severity\":\"{}\",\"message\":\"{}\"}}",
+            d.line,
+            d.severity,
+            escape_json_str(&d.message)
+        ));
+    }
+    diags_json.push(']');
+
+    let err_json = match res.error {
+        Some(e) => format!("\"{}\"", escape_json_str(&e)),
+        None => "null".to_string(),
+    };
+
+    format!(
+        "{{\"overlay\":{},\"title\":\"{}\",\"plots\":{},\"hlines\":{},\"diagnostics\":{},\"error\":{}}}",
+        res.overlay,
+        escape_json_str(&res.title),
+        plots_json,
+        hlines_json,
+        diags_json,
+        err_json
     )
 }
