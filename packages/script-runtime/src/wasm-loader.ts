@@ -19,6 +19,20 @@ export interface WasmRuntimeApi {
   taObv: (close: Float64Array, volume: Float64Array) => Float64Array;
   taMfi: (high: Float64Array, low: Float64Array, close: Float64Array, volume: Float64Array, period: number) => Float64Array;
   taSessionVwap: (high: Float64Array, low: Float64Array, close: Float64Array, volume: Float64Array, breaks: Uint8Array) => Float64Array;
+  runBacktestJson: (
+    open: Float64Array,
+    high: Float64Array,
+    low: Float64Array,
+    close: Float64Array,
+    strategyId: number,
+    paramA: number,
+    paramB: number,
+    stopLossPct: number,
+    takeProfitPct: number,
+    feeBps: number,
+    slippageBps: number,
+    initialCapital: number,
+  ) => string;
 }
 
 let cachedPromise: Promise<WasmRuntimeApi> | null = null;
@@ -49,6 +63,8 @@ export function loadBrowserWasm(): Promise<WasmRuntimeApi> {
         taObv: (c, vol) => mod.ta_obv(c, vol),
         taMfi: (h, l, c, vol, p) => mod.ta_mfi(h, l, c, vol, p),
         taSessionVwap: (h, l, c, vol, b) => mod.ta_session_vwap(h, l, c, vol, b),
+        runBacktestJson: (o, h, l, c, sid, pa, pb, sl, tp, fee, slip, cap) =>
+          mod.backtest_run_json(o, h, l, c, sid, pa, pb, sl, tp, fee, slip, cap),
       };
     })();
   }

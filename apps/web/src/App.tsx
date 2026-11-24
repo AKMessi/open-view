@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { PaperBrokerEngine, type PaperAccountSnapshot } from '@openview/broker-sdk';
 import type { ChartController, FrameTelemetry } from '@openview/chart-engine';
 import {
   DEFAULT_WATCHLIST_IDS,
@@ -28,6 +29,7 @@ import { IndicatorPickerModal } from './modals/IndicatorPickerModal.tsx';
 import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
 import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
 import { ObjectTreePanel } from './panels/ObjectTreePanel.tsx';
+import { OrderTicketPanel } from './panels/OrderTicketPanel.tsx';
 import { WatchlistPanel } from './panels/WatchlistPanel.tsx';
 import { MarketClient, type BridgeConnectionState } from './services/market-client.ts';
 import { loadWorkspaceLocal, saveWorkspaceLocal } from './storage/workspace-store.ts';
@@ -38,6 +40,8 @@ import { WorkspaceSyncBus } from './workbench/sync-bus.ts';
 
 // Lazy-loaded heavy drawers keep initial gzipped JS strictly < 200 KB!
 const ScriptDrawer = lazy(() => import('./lazy/ScriptDrawer.tsx'));
+const StrategyTesterDrawer = lazy(() => import('./lazy/StrategyTesterDrawer.tsx'));
+const OptionChainDrawer = lazy(() => import('./lazy/OptionChainDrawer.tsx'));
 
 type LayoutGrid = WorkspaceSnapshot['layoutGrid'];
 
@@ -112,8 +116,15 @@ export function App() {
   const syncBusRef = useRef<WorkspaceSyncBus>(new WorkspaceSyncBus());
   const drawingManagerRef = useRef<DrawingManager>(new DrawingManager());
   const replayClockRef = useRef<MasterReplayClock>(new MasterReplayClock());
+  const paperBrokerRef = useRef<PaperBrokerEngine>(new PaperBrokerEngine(100_000, 1));
   const activeControllerRef = useRef<ChartController | null>(null);
   const activeBarsRef = useRef<OHLCVBar[]>([]);
+  const [, setActiveBarsCount] = useState(0);
+  const [latestActiveBar, setLatestActiveBar] = useState<OHLCVBar | null>(null);
+  const [paperAccount, setPaperAccount] = useState<PaperAccountSnapshot>(() =>
+    paperBrokerRef.current.getSnapshot(),
+  );
+  const [bottomDrawer, setBottomDrawer] = useState<'none' | 'script' | 'backtest' | 'options'>('none');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quoteBufferRef = useRef<Record<string, QuoteTick>>({});
 
@@ -134,7 +145,6 @@ export function App() {
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false);
 
   // Lazy Script Drawer state
-  const [scriptDrawerOpen, setScriptDrawerOpen] = useState(false);
   const [scriptDraftCode, setScriptDraftCode] = useState(SCRIPT_TEMPLATES.ema_ribbon!.code);
   const [activeScriptCode, setActiveScriptCode] = useState<string | null>(null);
   const [scriptRunNonce, setScriptRunNonce] = useState(0);
@@ -146,7 +156,7 @@ export function App() {
   const [replaySnap, setReplaySnap] = useState<ReplaySnapshot>(() => replayClockRef.current.getSnapshot());
   const [replayTickNonce, setReplayTickNonce] = useState(0);
 
-  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'none'>('watchlist');
+  const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'trade' | 'none'>('watchlist');
   const [stress250k, setStress250k] = useState(false);
   const [activeMeta, setActiveMeta] = useState<{ info: SymbolInfo; label: string }>({
     info: findSymbolById('BINANCE:BTCUSDT')!,
@@ -175,11 +185,19 @@ export function App() {
   const layoutSpec = LAYOUTS.find((l) => l.id === layoutGrid) ?? LAYOUTS[0]!;
 
   useEffect(() => {
-    return replayClockRef.current.onChange((snap) => {
+    return paperBrokerRef.current.onChange(setPaperAccount);
+  }, []);
+
+  useEffect(() => {
+    return replayClockRef.current.onChange((snap, latestBaseBar) => {
       setReplaySnap(snap);
       setReplayTickNonce((n) => n + 1);
+      if (snap.active && latestBaseBar) {
+        setLatestActiveBar(latestBaseBar);
+        paperBrokerRef.current.onBarUpdate(activeMeta.info.id, latestBaseBar);
+      }
     });
-  }, []);
+  }, [activeMeta.info.id]);
 
   useEffect(() => {
     const dm = drawingManagerRef.current;
@@ -520,14 +538,36 @@ export function App() {
           </button>
 
           <button
-            onClick={() => setScriptDrawerOpen((v) => !v)}
+            onClick={() => setBottomDrawer((d) => (d === 'script' ? 'none' : 'script'))}
             className={`rounded px-2 py-1 text-[11px] font-medium ${
-              scriptDrawerOpen
+              bottomDrawer === 'script'
                 ? 'bg-[#2962ff]/25 text-[#6aa0ff]'
                 : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
             }`}
           >
             {'</>'} Script
+          </button>
+
+          <button
+            onClick={() => setBottomDrawer((d) => (d === 'backtest' ? 'none' : 'backtest'))}
+            className={`rounded px-2 py-1 text-[11px] font-medium ${
+              bottomDrawer === 'backtest'
+                ? 'bg-[#089981]/25 text-[#089981]'
+                : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+            }`}
+          >
+            Backtest
+          </button>
+
+          <button
+            onClick={() => setBottomDrawer((d) => (d === 'options' ? 'none' : 'options'))}
+            className={`rounded px-2 py-1 text-[11px] font-medium ${
+              bottomDrawer === 'options'
+                ? 'bg-[#ab47bc]/25 text-[#ce93d8]'
+                : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+            }`}
+          >
+            Options
           </button>
 
           <div className="h-4 w-px bg-[#2a2e39]" />
@@ -631,6 +671,15 @@ export function App() {
           >
             OBJ
           </button>
+          <button
+            onClick={() => setRightTab((t) => (t === 'trade' ? 'none' : 'trade'))}
+            className={`rounded border border-[#089981]/50 px-1.5 py-1 text-[10.5px] font-semibold ${
+              rightTab === 'trade' ? 'bg-[#089981] text-white' : 'text-[#089981]'
+            }`}
+            title="Paper Trading Order Ticket"
+          >
+            TRADE
+          </button>
           <span
             className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
               bridge.mode === 'local_bridge'
@@ -720,18 +769,25 @@ export function App() {
                 client={clientRef.current!}
                 syncBus={syncBusRef.current}
                 drawingManager={drawingManagerRef.current}
+                paperAccount={paperAccount}
                 reloadNonce={reloadNonce}
                 externalBarsOverride={localFileOverride}
                 onFocus={() => setActiveTileId(tile.id)}
                 onToggleMaximize={() =>
                   setMaximizedTileId((m) => (m === tile.id ? null : tile.id))
                 }
+                onLiveBarTick={(symId, bar) => {
+                  if (tile.id === activeTile.id) setLatestActiveBar(bar);
+                  paperBrokerRef.current.onBarUpdate(symId, bar);
+                }}
                 {...(tile.id === activeTile.id
                   ? {
                       onTelemetry: setTelemetry,
                       onResolvedMeta: (info, label) => setActiveMeta({ info, label }),
                       onBarsLoaded: (bars) => {
                         activeBarsRef.current = bars;
+                        setActiveBarsCount(bars.length);
+                        setLatestActiveBar(bars[bars.length - 1] ?? null);
                       },
                       onScriptOutput: (logs, ms, err) => {
                         setScriptLogs(logs);
@@ -745,10 +801,10 @@ export function App() {
             ))}
           </main>
 
-          {scriptDrawerOpen && (
+          {bottomDrawer === 'script' && (
             <Suspense fallback={<div className="h-60 border-t border-[#2a2e39] bg-[#131722] p-4 text-xs text-[#787b86]">Loading Script Editor...</div>}>
               <ScriptDrawer
-                open={scriptDrawerOpen}
+                open
                 code={scriptDraftCode}
                 logs={scriptLogs}
                 {...(scriptError !== undefined ? { error: scriptError } : {})}
@@ -764,11 +820,45 @@ export function App() {
                   setScriptLogs([]);
                   setScriptError(undefined);
                 }}
-                onClose={() => setScriptDrawerOpen(false)}
+                onClose={() => setBottomDrawer('none')}
+              />
+            </Suspense>
+          )}
+
+          {bottomDrawer === 'backtest' && (
+            <Suspense fallback={<div className="h-64 border-t border-[#2a2e39] bg-[#131722] p-4 text-xs text-[#787b86]">Loading Strategy Tester...</div>}>
+              <StrategyTesterDrawer
+                open
+                symbolTicker={activeMeta.info.ticker}
+                bars={activeBarsRef.current}
+                isDark={isDark}
+                onClose={() => setBottomDrawer('none')}
+              />
+            </Suspense>
+          )}
+
+          {bottomDrawer === 'options' && (
+            <Suspense fallback={<div className="h-72 border-t border-[#2a2e39] bg-[#131722] p-4 text-xs text-[#787b86]">Loading Option Chain...</div>}>
+              <OptionChainDrawer
+                open
+                symbol={activeMeta.info}
+                spotPrice={latestActiveBar?.close ?? 100}
+                isDark={isDark}
+                onClose={() => setBottomDrawer('none')}
               />
             </Suspense>
           )}
         </div>
+
+        {rightTab === 'trade' && (
+          <OrderTicketPanel
+            symbol={activeMeta.info}
+            latestBar={latestActiveBar}
+            account={paperAccount}
+            broker={paperBrokerRef.current}
+            isDark={isDark}
+          />
+        )}
 
         {rightTab === 'watchlist' && (
           <WatchlistPanel

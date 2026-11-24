@@ -5,6 +5,7 @@ import {
   type FrameTelemetry,
 } from '@openview/chart-engine';
 import { findSymbolById } from '@openview/datafeed-sdk';
+import type { PaperAccountSnapshot } from '@openview/broker-sdk';
 import type { DrawingManager } from '@openview/drawings';
 import type { ChartTileState, OHLCVBar, SymbolInfo } from '@openview/protocol';
 import type { MasterReplayClock } from '@openview/replay-engine';
@@ -33,6 +34,7 @@ interface ChartTileProps {
   client: MarketClient;
   syncBus: WorkspaceSyncBus;
   drawingManager: DrawingManager;
+  paperAccount?: PaperAccountSnapshot;
   reloadNonce: number;
   externalBarsOverride?: { symbol: SymbolInfo; bars: OHLCVBar[]; label: string } | null;
   onFocus: () => void;
@@ -40,6 +42,7 @@ interface ChartTileProps {
   onTelemetry?: (t: FrameTelemetry) => void;
   onResolvedMeta?: (info: SymbolInfo, providerLabel: string) => void;
   onBarsLoaded?: (bars: OHLCVBar[], info: SymbolInfo) => void;
+  onLiveBarTick?: (symbolId: string, bar: OHLCVBar) => void;
   onScriptOutput?: (logs: string[], elapsedMs: number, error?: string) => void;
   controllerOutRef?: React.MutableRefObject<ChartController | null>;
 }
@@ -63,6 +66,7 @@ export function ChartTile({
   client,
   syncBus,
   drawingManager,
+  paperAccount,
   reloadNonce,
   externalBarsOverride,
   onFocus,
@@ -70,6 +74,7 @@ export function ChartTile({
   onTelemetry,
   onResolvedMeta,
   onBarsLoaded,
+  onLiveBarTick,
   onScriptOutput,
   controllerOutRef,
 }: ChartTileProps) {
@@ -77,6 +82,8 @@ export function ChartTile({
   const controllerRef = useRef<ChartController | null>(null);
   const symbolRef = useRef<SymbolInfo>(findSymbolById(tile.symbol)!);
   const barsRef = useRef<OHLCVBar[]>([]);
+  const paperAccountRef = useRef<PaperAccountSnapshot | undefined>(paperAccount);
+  paperAccountRef.current = paperAccount;
   const mountedSubPanesRef = useRef<Set<string>>(new Set());
   const [drawRev, setDrawRev] = useState(0);
 
@@ -100,7 +107,72 @@ export function ChartTile({
     if (isActive && controllerOutRef) controllerOutRef.current = ctrl;
 
     ctrl.setOverlayRenderers(
-      (ctx) => drawingManager.renderCommitted(ctx, symbolRef.current.id, ctrl.getMainCoordBridge()),
+      (ctx) => {
+        const bridge = ctrl.getMainCoordBridge();
+        drawingManager.renderCommitted(ctx, symbolRef.current.id, bridge);
+
+        // On-chart Visual Trading: render open Paper Position & Working Limit/SL/TP Order lines
+        const acct = paperAccountRef.current;
+        if (!acct) return;
+        const symId = symbolRef.current.id;
+        ctx.save();
+        ctx.setTransform(bridge.horizontalPixelRatio, 0, 0, bridge.verticalPixelRatio, 0, 0);
+
+        const drawPriceBadgeLine = (price: number, color: string, label: string, dashed = false) => {
+          const y = bridge.priceToY(price);
+          if (y < bridge.paneRect.y || y > bridge.paneRect.y + bridge.paneRect.height) return;
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.25;
+          if (dashed) ctx.setLineDash([5, 3]);
+          ctx.beginPath();
+          ctx.moveTo(bridge.paneRect.x, y);
+          ctx.lineTo(bridge.paneRect.x + bridge.paneRect.width, y);
+          ctx.stroke();
+
+          ctx.font = '600 10.5px monospace';
+          const tw = ctx.measureText(label).width + 12;
+          const bx = bridge.paneRect.x + bridge.paneRect.width - tw - 10;
+          ctx.fillStyle = color;
+          ctx.fillRect(bx, y - 9, tw, 18);
+          ctx.fillStyle = '#ffffff';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(label, bx + 6, y + 0.5);
+          ctx.restore();
+        };
+
+        const pos = acct.positions.find((p) => p.symbol === symId);
+        if (pos) {
+          const pnlSign = pos.unrealizedPnl >= 0 ? '+' : '';
+          drawPriceBadgeLine(
+            pos.avgEntryPrice,
+            pos.side === 'long' ? '#089981' : '#f23645',
+            `${pos.side.toUpperCase()} ${pos.quantity} · ${pnlSign}${pos.unrealizedPnl.toFixed(2)}`,
+            false,
+          );
+        }
+
+        for (const ord of acct.workingOrders) {
+          if (ord.symbol !== symId || ord.price === undefined) continue;
+          const color =
+            ord.role === 'sl'
+              ? '#f23645'
+              : ord.role === 'tp'
+                ? '#089981'
+                : ord.side === 'buy'
+                  ? '#2962ff'
+                  : '#f7931a';
+          const tag =
+            ord.role === 'sl'
+              ? `SL ${ord.quantity}`
+              : ord.role === 'tp'
+                ? `TP ${ord.quantity}`
+                : `${ord.side.toUpperCase()} ${ord.type.toUpperCase()} ${ord.quantity}`;
+          drawPriceBadgeLine(ord.price, color, tag, true);
+        }
+        ctx.restore();
+      },
       (ctx) => drawingManager.renderDraftAndHandles(ctx, symbolRef.current.id, ctrl.getMainCoordBridge()),
     );
 
@@ -259,6 +331,7 @@ export function ChartTile({
       },
       onBarUpdate: (bar, quality) => {
         ctrl.upsertBar(bar);
+        onLiveBarTick?.(symbolRef.current.id, bar);
         const list = barsRef.current;
         if (list.length > 0 && list[list.length - 1]!.time === bar.time) {
           list[list.length - 1] = bar;
@@ -306,6 +379,10 @@ export function ChartTile({
   useEffect(() => {
     controllerRef.current?.setTheme(theme);
   }, [theme]);
+
+  useEffect(() => {
+    controllerRef.current?.requestRedraw(true);
+  }, [paperAccount]);
 
   void drawRev;
   const selectedDrawing = isActive ? drawingManager.getSelected() : null;

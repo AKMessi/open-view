@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 pub mod arena;
+pub mod backtester;
 pub mod ta;
 
 pub use arena::BarArena;
@@ -180,4 +181,78 @@ pub fn ta_session_vwap(
     out.extend_from_slice(&u1);
     out.extend_from_slice(&l1);
     out
+}
+
+/// Runs the Rust deterministic strategy backtester and returns a JSON report string
+/// containing metrics, downsampled equity curve (<= 300 pts), and trade PnLs.
+#[wasm_bindgen]
+pub fn backtest_run_json(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    strategy_id: u32,
+    param_a: usize,
+    param_b: usize,
+    stop_loss_pct: f64,
+    take_profit_pct: f64,
+    fee_bps: f64,
+    slippage_bps: f64,
+    initial_capital: f64,
+) -> String {
+    let s = backtester::run_backtest(
+        open,
+        high,
+        low,
+        close,
+        strategy_id,
+        param_a,
+        param_b,
+        stop_loss_pct,
+        take_profit_pct,
+        fee_bps,
+        slippage_bps,
+        initial_capital,
+    );
+    let step = (s.equity_curve.len() / 240).max(1);
+    let mut eq_str = String::with_capacity(2048);
+    eq_str.push('[');
+    let mut first = true;
+    for (idx, val) in s.equity_curve.iter().enumerate() {
+        if idx % step == 0 || idx + 1 == s.equity_curve.len() {
+            if !first {
+                eq_str.push(',');
+            }
+            first = false;
+            eq_str.push_str(&format!("{:.2}", val));
+        }
+    }
+    eq_str.push(']');
+
+    let mut pnl_str = String::with_capacity(512);
+    pnl_str.push('[');
+    for (idx, p) in s.trade_pnls.iter().take(200).enumerate() {
+        if idx > 0 {
+            pnl_str.push(',');
+        }
+        pnl_str.push_str(&format!("{:.2}", p));
+    }
+    pnl_str.push(']');
+
+    format!(
+        "{{\"initialCapital\":{:.2},\"finalEquity\":{:.2},\"netProfit\":{:.2},\"netProfitPct\":{:.2},\"totalTrades\":{},\"winningTrades\":{},\"winRatePct\":{:.2},\"profitFactor\":{:.2},\"maxDrawdownPct\":{:.2},\"sharpeRatio\":{:.2},\"totalFees\":{:.2},\"equityCurve\":{},\"tradePnls\":{}}}",
+        s.initial_capital,
+        s.final_equity,
+        s.net_profit,
+        s.net_profit_pct,
+        s.total_trades,
+        s.winning_trades,
+        s.win_rate_pct,
+        s.profit_factor,
+        s.max_drawdown_pct,
+        s.sharpe_ratio,
+        s.total_fees,
+        eq_str,
+        pnl_str,
+    )
 }
