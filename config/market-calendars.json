@@ -1,0 +1,84 @@
+{
+  "version": "2026.1",
+  "exchanges": {
+    "CRYPTO": {
+      "timezone": "UTC",
+      "mode": "24x7",
+      "regular": { "open": "00:00", "close": "24:00" },
+      "tradingDays": [0, 1, 2, 3, 4, 5, 6],
+      "holidays": [],
+      "earlyCloses": [],
+      "specialSessions": []
+    },
+    "FOREX_OTC": {
+      "timezone": "America/New_York",
+      "mode": "ny_close_24x5",
+      "rolloverTime": "17:00",
+      "weekOpen": { "day": 0, "time": "17:00" },
+      "weekClose": { "day": 5, "time": "17:00" },
+      "holidays": ["2025-12-25", "2026-01-01", "2026-12-25"],
+      "earlyCloses": [],
+      "specialSessions": []
+    },
+    "US_EQUITY": {
+      "timezone": "America/New_York",
+      "mode": "session_anchored",
+      "preMarket": { "open": "04:00", "close": "09:30" },
+      "regular": { "open": "09:30", "close": "16:00" },
+      "postMarket": { "open": "16:00", "close": "20:00" },
+      "tradingDays": [1, 2, 3, 4, 5],
+      "holidays": [
+        "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18",
+        "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01",
+        "2025-11-27", "2025-12-25",
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+        "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+        "2026-11-26", "2026-12-25"
+      ],
+      "earlyCloses": [
+        { "date": "2025-07-03", "close": "13:00", "reason": "Independence Day Eve" },
+        { "date": "2025-11-28", "close": "13:00", "reason": "Day After Thanksgiving" },
+        { "date": "2025-12-24", "close": "13:00", "reason": "Christmas Eve" },
+        { "date": "2026-11-27", "close": "13:00", "reason": "Day After Thanksgiving" },
+        { "date": "2026-12-24", "close": "13:00", "reason": "Christmas Eve" }
+      ],
+      "specialSessions": []
+    },
+    "NSE": {
+      "timezone": "Asia/Kolkata",
+      "mode": "session_anchored",
+      "preMarket": { "open": "09:00", "close": "09:15" },
+      "regular": { "open": "09:15", "close": "15:30" },
+      "postMarket": { "open": "15:40", "close": "16:00" },
+      "tradingDays": [1, 2, 3, 4, 5],
+      "holidays": [
+        "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
+        "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
+        "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
+        "2025-11-05", "2025-12-25",
+        "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
+        "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
+        "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
+        "2026-11-10", "2026-11-24", "2026-12-25"
+      ],
+      "earlyCloses": [],
+      "specialSessions": [
+        { "date": "2025-02-01", "open": "09:15", "close": "15:30", "reason": "Union Budget Special Saturday Session" },
+        { "date": "2025-10-21", "open": "13:45", "close": "14:45", "reason": "Diwali Muhurat Trading 2025" },
+        { "date": "2026-02-01", "open": "09:15", "close": "15:30", "reason": "Union Budget Special Sunday Session" },
+        { "date": "2026-11-08", "open": "18:00", "close": "19:00", "reason": "Diwali Muhurat Trading 2026" }
+      ]
+    },
+    "MCX": {
+      "timezone": "Asia/Kolkata",
+      "mode": "mcx_us_dst_coupled",
+      "regular": { "open": "09:00", "closeUsDst": "23:30", "closeUsStd": "23:55" },
+      "tradingDays": [1, 2, 3, 4, 5],
+      "holidays": ["2026-01-26", "2026-04-03", "2026-08-15", "2026-10-02", "2026-12-25"],
+      "earlyCloses": [],
+      "specialSessions": [
+        { "date": "2026-11-08", "open": "18:00", "close": "19:00", "reason": "Diwali Muhurat Trading 2026" }
+      ]
+    }
+  }
+}

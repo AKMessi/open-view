@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --ov-bg: #0b0e14;
+  --ov-panel: #131722;
+  --ov-border: #2a2e39;
+  --ov-text: #d1d4dc;
+  --ov-muted: #787b86;
+  --ov-accent: #2962ff;
+  --ov-up: #089981;
+  --ov-down: #f23645;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}

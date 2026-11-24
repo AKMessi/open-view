@@ -1,0 +1,28 @@
+# Dependencies & builds
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Rust & WASM tool artifacts
+target/
+.tools/
+packages/script-runtime/src/wasm-pkg/
+apps/server/src/wasm-pkg/
+
+# Local runtime state & secrets (NEVER commit!)
+.data/
+.vault/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+!.env.example
+
+# Tests & IDE
+coverage/
+playwright-report/
+test-results/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+[package]
+name = "openview-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Zero-copy resident bar arena, TA engine, Pine-compatible VM, and backtester compiled to WebAssembly"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Exact patch pin matching scripts/bootstrap-wasm.mjs WASM_BINDGEN_VERSION
+wasm-bindgen = "=0.2.130"
+js-sys = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

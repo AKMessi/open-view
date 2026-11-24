@@ -1,0 +1,30 @@
+{
+  "name": "openview-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "bootstrap:wasm": "node scripts/bootstrap-wasm.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "npm --workspace @openview/web run dev",
+    "dev:server": "npm --workspace @openview/server run dev",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:rust": "node scripts/test-rust.mjs",
+    "build": "node scripts/build-wasm.mjs && npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  }
+}

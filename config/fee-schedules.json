@@ -1,0 +1,83 @@
+{
+  "version": "2026.1",
+  "schedules": {
+    "crypto_spot": {
+      "label": "Crypto Spot (Maker/Taker)",
+      "currency": "USD",
+      "makerBps": 10,
+      "takerBps": 10,
+      "slippageTicks": 1
+    },
+    "crypto_perps": {
+      "label": "Crypto Perpetuals",
+      "currency": "USD",
+      "makerBps": 2,
+      "takerBps": 5,
+      "slippageTicks": 1
+    },
+    "forex_spot": {
+      "label": "Forex / Spot Metals OTC",
+      "currency": "USD",
+      "commissionPerLot": 3.5,
+      "spreadTicks": 2,
+      "slippageTicks": 1
+    },
+    "us_equities": {
+      "label": "US Equities (Retail Zero-Commission)",
+      "currency": "USD",
+      "commissionPerShare": 0,
+      "secFeeSellRate": 0.0000278,
+      "finraTafSellPerShare": 0.000166,
+      "finraTafMaxPerOrder": 8.3,
+      "slippageTicks": 1
+    },
+    "nse_equity_intraday": {
+      "label": "NSE Equity Intraday (MIS)",
+      "currency": "INR",
+      "brokeragePercent": 0.0003,
+      "brokerageCapPerOrder": 20,
+      "sttBuyRate": 0,
+      "sttSellRate": 0.00025,
+      "exchangeTxnRate": 0.0000297,
+      "sebiTurnoverRate": 0.000001,
+      "stampDutyBuyRate": 0.00003,
+      "gstRate": 0.18,
+      "dpChargeSellFlat": 0
+    },
+    "nse_equity_delivery": {
+      "label": "NSE Equity Delivery (CNC)",
+      "currency": "INR",
+      "brokeragePercent": 0,
+      "brokerageCapPerOrder": 0,
+      "sttBuyRate": 0.001,
+      "sttSellRate": 0.001,
+      "exchangeTxnRate": 0.0000297,
+      "sebiTurnoverRate": 0.000001,
+      "stampDutyBuyRate": 0.00015,
+      "gstRate": 0.18,
+      "dpChargeSellFlat": 15.93
+    },
+    "nse_futures": {
+      "label": "NSE Index & Stock Futures",
+      "currency": "INR",
+      "brokerageFlatPerOrder": 20,
+      "sttBuyRate": 0,
+      "sttSellRate": 0.0002,
+      "exchangeTxnRate": 0.0000173,
+      "sebiTurnoverRate": 0.000001,
+      "stampDutyBuyRate": 0.00002,
+      "gstRate": 0.18
+    },
+    "nse_options": {
+      "label": "NSE Index & Stock Options (Premium)",
+      "currency": "INR",
+      "brokerageFlatPerOrder": 20,
+      "sttBuyRate": 0,
+      "sttSellRate": 0.001,
+      "exchangeTxnRate": 0.0003503,
+      "sebiTurnoverRate": 0.000001,
+      "stampDutyBuyRate": 0.00003,
+      "gstRate": 0.18
+    }
+  }
+}
