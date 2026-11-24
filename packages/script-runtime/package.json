@@ -9,6 +9,7 @@
     }
   },
   "dependencies": {
+    "@openview/chart-engine": "0.1.0",
     "@openview/protocol": "0.1.0"
   },
   "scripts": {

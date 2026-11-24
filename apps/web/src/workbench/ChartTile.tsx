@@ -6,12 +6,13 @@ import {
 } from '@openview/chart-engine';
 import { findSymbolById } from '@openview/datafeed-sdk';
 import type { DrawingManager } from '@openview/drawings';
-import type {
-  ChartTileState,
-  OHLCVBar,
-  SymbolInfo,
-} from '@openview/protocol';
-import { loadBrowserWasm } from '@openview/script-runtime';
+import type { ChartTileState, OHLCVBar, SymbolInfo } from '@openview/protocol';
+import type { MasterReplayClock } from '@openview/replay-engine';
+import {
+  computeBuiltinIndicators,
+  loadBrowserWasm,
+  runCustomIndicatorScript,
+} from '@openview/script-runtime';
 import type { MarketClient } from '../services/market-client.ts';
 import type { WorkspaceSyncBus } from './sync-bus.ts';
 
@@ -21,9 +22,14 @@ interface ChartTileProps {
   isMaximized: boolean;
   bridgeOnlineMode: 'connecting' | 'local_bridge' | 'static_mode';
   theme: 'dark' | 'light';
-  showRsiPane: boolean;
+  activeIndicatorIds: string[];
+  customScriptCode: string | null;
+  scriptRunNonce: number;
   stress250k: boolean;
   syncCrosshair: boolean;
+  replayActive: boolean;
+  replayClock: MasterReplayClock;
+  replayTickNonce: number;
   client: MarketClient;
   syncBus: WorkspaceSyncBus;
   drawingManager: DrawingManager;
@@ -33,6 +39,8 @@ interface ChartTileProps {
   onToggleMaximize: () => void;
   onTelemetry?: (t: FrameTelemetry) => void;
   onResolvedMeta?: (info: SymbolInfo, providerLabel: string) => void;
+  onBarsLoaded?: (bars: OHLCVBar[], info: SymbolInfo) => void;
+  onScriptOutput?: (logs: string[], elapsedMs: number, error?: string) => void;
   controllerOutRef?: React.MutableRefObject<ChartController | null>;
 }
 
@@ -44,9 +52,14 @@ export function ChartTile({
   isMaximized,
   bridgeOnlineMode,
   theme,
-  showRsiPane,
+  activeIndicatorIds,
+  customScriptCode,
+  scriptRunNonce,
   stress250k,
   syncCrosshair,
+  replayActive,
+  replayClock,
+  replayTickNonce,
   client,
   syncBus,
   drawingManager,
@@ -56,11 +69,15 @@ export function ChartTile({
   onToggleMaximize,
   onTelemetry,
   onResolvedMeta,
+  onBarsLoaded,
+  onScriptOutput,
   controllerOutRef,
 }: ChartTileProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<ChartController | null>(null);
   const symbolRef = useRef<SymbolInfo>(findSymbolById(tile.symbol)!);
+  const barsRef = useRef<OHLCVBar[]>([]);
+  const mountedSubPanesRef = useRef<Set<string>>(new Set());
   const [drawRev, setDrawRev] = useState(0);
 
   // Mount ChartController once per tile (strictly 2 canvases per tile!)
@@ -82,7 +99,6 @@ export function ChartTile({
     controllerRef.current = ctrl;
     if (isActive && controllerOutRef) controllerOutRef.current = ctrl;
 
-    // Bind committed & interactive drawing overlays onto the tile's 2 canvases
     ctrl.setOverlayRenderers(
       (ctx) => drawingManager.renderCommitted(ctx, symbolRef.current.id, ctrl.getMainCoordBridge()),
       (ctx) => drawingManager.renderDraftAndHandles(ctx, symbolRef.current.id, ctrl.getMainCoordBridge()),
@@ -109,7 +125,7 @@ export function ChartTile({
     });
 
     ctrl.onLoadMoreHistory((beforeTime) => {
-      client.requestMoreHistory(tile.id, beforeTime, 400);
+      if (!replayActive) client.requestMoreHistory(tile.id, beforeTime, 400);
     });
 
     const unsubDraw = drawingManager.onChange(() => {
@@ -144,54 +160,75 @@ export function ChartTile({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tile.id]);
 
-  // Keep active controller ref synced
   useEffect(() => {
     if (isActive && controllerOutRef) {
       controllerOutRef.current = controllerRef.current;
     }
   }, [isActive, controllerOutRef]);
 
-  const applyRsi = (ctrl: ChartController, bars: readonly OHLCVBar[]) => {
-    if (!showRsiPane) {
-      ctrl.removeSubPane('rsi14');
-      return;
-    }
-    ctrl.addSubPane('rsi14', 0.23, 2);
-    const closes = new Float64Array(bars.length);
-    for (let i = 0; i < bars.length; i++) closes[i] = bars[i]!.close;
+  const recomputeIndicators = (ctrl: ChartController, bars: readonly OHLCVBar[], info: SymbolInfo) => {
     void loadBrowserWasm()
-      .then((api) => {
-        const rsi = api.taRsi(closes, 14);
-        ctrl.setSubPanePlots(
-          'rsi14',
-          [
-            {
-              id: 'rsi14',
-              title: 'RSI (14)',
-              color: '#7e57c2',
-              kind: 'line',
-              startBarIndex: 0,
-              values: rsi,
-              refLines: [30, 70],
-            },
-          ],
-          [0, 100],
-        );
+      .then((wasm) => {
+        const computed = computeBuiltinIndicators(wasm, activeIndicatorIds, bars, info);
+        const overlays = [...computed.overlays];
+        const subPanes = [...computed.subPanes];
+
+        if (customScriptCode && isActive) {
+          const customRes = runCustomIndicatorScript(customScriptCode, bars, wasm);
+          overlays.push(...customRes.overlays);
+          if (customRes.subPanePlots.length > 0) {
+            subPanes.push({ paneId: 'custom_script', plots: customRes.subPanePlots });
+          }
+          onScriptOutput?.(customRes.logs, customRes.elapsedMs, customRes.error);
+        }
+
+        ctrl.setMainOverlays(overlays);
+
+        const nextPaneIds = new Set(subPanes.map((s) => s.paneId));
+        for (const existing of [...mountedSubPanesRef.current]) {
+          if (!nextPaneIds.has(existing)) {
+            ctrl.removeSubPane(existing);
+            mountedSubPanesRef.current.delete(existing);
+          }
+        }
+        for (const sp of subPanes) {
+          if (!mountedSubPanesRef.current.has(sp.paneId)) {
+            ctrl.addSubPane(sp.paneId, 0.22, 2);
+            mountedSubPanesRef.current.add(sp.paneId);
+          }
+          ctrl.setSubPanePlots(sp.paneId, sp.plots, sp.fixedRange);
+        }
       })
       .catch(() => {});
   };
 
-  // Subscribe datafeed (or local CSV/Parquet override / 250k stress test)
+  // Master-Clock Multi-TF Replay override
   useEffect(() => {
     const ctrl = controllerRef.current;
-    if (!ctrl || bridgeOnlineMode === 'connecting') return;
+    if (!ctrl || !replayActive) return;
+    const rolled = replayClock.getRolledUpSeries(tile.resolution, symbolRef.current.calendarId);
+    barsRef.current = rolled;
+    const replayInfo: SymbolInfo = { ...symbolRef.current, feedQuality: 'replay' };
+    ctrl.setSymbolInfo(replayInfo, tile.resolution);
+    ctrl.setBars(rolled, Math.min(160, Math.max(40, rolled.length)));
+    recomputeIndicators(ctrl, rolled, replayInfo);
+    onResolvedMeta?.(replayInfo, 'Master-Clock Replay');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayActive, replayTickNonce, tile.resolution]);
+
+  // Live / Historical Datafeed Subscription
+  useEffect(() => {
+    const ctrl = controllerRef.current;
+    if (!ctrl || bridgeOnlineMode === 'connecting' || replayActive) return;
 
     if (externalBarsOverride && isActive) {
       symbolRef.current = externalBarsOverride.symbol;
+      barsRef.current = externalBarsOverride.bars;
       ctrl.setSymbolInfo(externalBarsOverride.symbol, tile.resolution);
       ctrl.setBars(externalBarsOverride.bars, 160);
-      applyRsi(ctrl, externalBarsOverride.bars);
+      recomputeIndicators(ctrl, externalBarsOverride.bars, externalBarsOverride.symbol);
       onResolvedMeta?.(externalBarsOverride.symbol, externalBarsOverride.label);
+      onBarsLoaded?.(externalBarsOverride.bars, externalBarsOverride.symbol);
       return;
     }
 
@@ -201,36 +238,58 @@ export function ChartTile({
 
     if (stress250k && isActive) {
       const bars = generateSyntheticBars(sym, tile.resolution, 250_000, 99);
+      barsRef.current = bars;
       ctrl.setSymbolInfo(sym, tile.resolution);
       ctrl.setBars(bars, 250_000);
-      applyRsi(ctrl, bars);
+      recomputeIndicators(ctrl, bars, sym);
       onResolvedMeta?.(sym, '250k Mipmap Benchmark');
+      onBarsLoaded?.(bars, sym);
       return;
     }
 
     const unsub = client.subscribeChart(tile.id, tile.symbol, tile.resolution, {
       onSnapshot: (resolvedInfo, bars, _noMore, label) => {
         symbolRef.current = resolvedInfo;
+        barsRef.current = bars;
         ctrl.setSymbolInfo(resolvedInfo, tile.resolution);
         ctrl.setBars(bars, 140);
-        applyRsi(ctrl, bars);
+        recomputeIndicators(ctrl, bars, resolvedInfo);
         onResolvedMeta?.(resolvedInfo, label);
+        onBarsLoaded?.(bars, resolvedInfo);
       },
       onBarUpdate: (bar, quality) => {
         ctrl.upsertBar(bar);
+        const list = barsRef.current;
+        if (list.length > 0 && list[list.length - 1]!.time === bar.time) {
+          list[list.length - 1] = bar;
+        } else {
+          list.push(bar);
+        }
         if (symbolRef.current.feedQuality !== quality) {
           symbolRef.current = { ...symbolRef.current, feedQuality: quality };
           onResolvedMeta?.(symbolRef.current, symbolRef.current.provider);
         }
       },
       onHistoryResult: (olderBars) => {
-        if (olderBars.length > 0) ctrl.prependBars(olderBars);
+        if (olderBars.length > 0) {
+          barsRef.current = [...olderBars, ...barsRef.current];
+          ctrl.prependBars(olderBars);
+          recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
+        }
       },
     });
 
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tile.symbol, tile.resolution, bridgeOnlineMode, stress250k, showRsiPane, reloadNonce, externalBarsOverride]);
+  }, [tile.symbol, tile.resolution, bridgeOnlineMode, stress250k, reloadNonce, externalBarsOverride, replayActive]);
+
+  // Recompute WASM indicators whenever indicator list or custom script changes
+  useEffect(() => {
+    const ctrl = controllerRef.current;
+    if (!ctrl || barsRef.current.length === 0) return;
+    recomputeIndicators(ctrl, barsRef.current, symbolRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndicatorIds, customScriptCode, scriptRunNonce]);
 
   useEffect(() => {
     controllerRef.current?.setChartStyle(tile.chartStyle);
@@ -248,7 +307,6 @@ export function ChartTile({
     controllerRef.current?.setTheme(theme);
   }, [theme]);
 
-  // Selected drawing floating style bar (rendered only on active tile when a drawing on this symbol is selected)
   void drawRev;
   const selectedDrawing = isActive ? drawingManager.getSelected() : null;
   const showFloatingStyleBar = selectedDrawing && selectedDrawing.symbol === symbolRef.current.id;
@@ -266,7 +324,6 @@ export function ChartTile({
     >
       <div ref={containerRef} className="h-full w-full" />
 
-      {/* Top-right tile quick-maximize button */}
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -278,7 +335,6 @@ export function ChartTile({
         {isMaximized ? '❐' : '□'}
       </button>
 
-      {/* Floating Contextual Drawing Style Toolbar */}
       {showFloatingStyleBar && selectedDrawing && (
         <div
           onMouseDown={(e) => e.stopPropagation()}
@@ -291,7 +347,7 @@ export function ChartTile({
               key={c}
               onClick={() => drawingManager.updateStyle(selectedDrawing.id, { color: c })}
               className={`h-4 w-4 rounded-full border ${
-                selectedDrawing.style.color === c ? 'border-white scale-110' : 'border-transparent'
+                selectedDrawing.style.color === c ? 'scale-110 border-white' : 'border-transparent'
               }`}
               style={{ background: c }}
             />
@@ -299,9 +355,7 @@ export function ChartTile({
           <div className="h-3.5 w-px bg-[#2a2e39]" />
           <button
             onClick={() =>
-              drawingManager.updateStyle(selectedDrawing.id, {
-                dashed: !selectedDrawing.style.dashed,
-              })
+              drawingManager.updateStyle(selectedDrawing.id, { dashed: !selectedDrawing.style.dashed })
             }
             className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
               selectedDrawing.style.dashed ? 'bg-[#2962ff]/25 text-[#6aa0ff]' : 'text-[#868993]'

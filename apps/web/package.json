@@ -8,6 +8,7 @@
     "@openview/datafeed-sdk": "0.1.0",
     "@openview/drawings": "0.1.0",
     "@openview/protocol": "0.1.0",
+    "@openview/replay-engine": "0.1.0",
     "@openview/script-runtime": "0.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

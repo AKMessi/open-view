@@ -10,7 +10,10 @@ import type { MipmapPlotList, PlotBarView } from '../model/mipmap-plot-list.ts';
 import type { SymlogPriceScale } from '../model/price-scale.ts';
 import { getLocalParts, type SessionCalendar } from '../model/session-calendar.ts';
 import type { TimeScale } from '../model/time-scale.ts';
+import type { MainOverlayPlot, SubPaneSeriesPlot } from '../model/plot-types.ts';
 import type { ChartTheme } from './theme.ts';
+
+export type { MainOverlayPlot, SubPaneSeriesPlot } from '../model/plot-types.ts';
 
 export interface CrosshairState {
   visible: boolean;
@@ -19,17 +22,6 @@ export interface CrosshairState {
   paneId: string;
   barIndex: number | null;
   price: number | null;
-}
-
-export interface SubPaneSeriesPlot {
-  id: string;
-  title: string;
-  color: string;
-  kind: 'line' | 'histogram';
-  /** Aligned to barIndex starting at startBarIndex */
-  startBarIndex: number;
-  values: Float64Array;
-  refLines?: number[];
 }
 
 export interface BaseRenderInput {
@@ -46,6 +38,7 @@ export interface BaseRenderInput {
   timeScale: TimeScale;
   mainPriceScale: SymlogPriceScale;
   calendar: SessionCalendar;
+  mainOverlays?: readonly MainOverlayPlot[];
   subPanes: Map<string, { priceScale: SymlogPriceScale; plots: SubPaneSeriesPlot[] }>;
   onMainPaneBaseOverlay?: (ctx: CanvasRenderingContext2D) => void;
 }
@@ -241,6 +234,11 @@ export function renderBaseLayer(input: BaseRenderInput): { drawnBars: number; mi
       ctx.stroke();
       ctx.restore();
     }
+
+    // Main-Pane Indicator Overlays (EMA, SMA, BB Clouds, Keltner, Donchian, SuperTrend, Session VWAP)
+    if (input.mainOverlays && input.mainOverlays.length > 0) {
+      drawMainOverlays(ctx, input.mainOverlays, vis.from, vis.to, timeScale, mainPriceScale, rx, ry, theme);
+    }
   }
 
   // Optional committed drawings / chart-trading base overlay clipped strictly to main pane
@@ -287,7 +285,21 @@ export function renderBaseLayer(input: BaseRenderInput): { drawnBars: number; mi
         ctx.restore();
       }
 
-      if (plot.kind === 'line') {
+      if (plot.kind === 'histogram') {
+        const zeroY = sub.priceScale.priceToCoordinate(0) * ry;
+        const start = Math.max(vis.from, plot.startBarIndex);
+        const end = Math.min(vis.to, plot.startBarIndex + plot.values.length - 1);
+        for (let idx = start; idx <= end; idx++) {
+          const v = plot.values[idx - plot.startBarIndex]!;
+          if (Number.isNaN(v)) continue;
+          const geom = computeCandleBitmapMetrics(timeScale.indexToCoordinate(idx), timeScale.barSpacing, rx);
+          const py = sub.priceScale.priceToCoordinate(v) * ry;
+          const top = Math.min(zeroY, py);
+          const h = Math.max(1, Math.abs(py - zeroY));
+          ctx.fillStyle = v >= 0 ? theme.volUp : theme.volDown;
+          ctx.fillRect(geom.bodyLeftPx, top, geom.bodyWidthPx, h);
+        }
+      } else if (plot.kind === 'line') {
         ctx.strokeStyle = plot.color;
         ctx.lineWidth = Math.max(1, Math.round(1.5 * ry));
         ctx.beginPath();
@@ -355,6 +367,108 @@ export function renderBaseLayer(input: BaseRenderInput): { drawnBars: number; mi
 
   ctx.restore();
   return { drawnBars, mipmapStride };
+}
+
+function drawMainOverlays(
+  ctx: CanvasRenderingContext2D,
+  overlays: readonly MainOverlayPlot[],
+  fromIdx: number,
+  toIdx: number,
+  timeScale: TimeScale,
+  priceScale: SymlogPriceScale,
+  rx: number,
+  ry: number,
+  theme: ChartTheme,
+): void {
+  for (const ov of overlays) {
+    const start = Math.max(fromIdx, ov.startBarIndex);
+    const end = Math.min(toIdx, ov.startBarIndex + ov.values.length - 1);
+    if (start > end) continue;
+
+    if (ov.kind === 'band_fill' && ov.extraValues && ov.lowerValues) {
+      // Translucent channel fill between upper (extraValues) and lower (lowerValues)
+      const upperPts: Array<{ x: number; y: number }> = [];
+      const lowerPts: Array<{ x: number; y: number }> = [];
+      for (let idx = start; idx <= end; idx++) {
+        const u = ov.extraValues[idx - ov.startBarIndex]!;
+        const l = ov.lowerValues[idx - ov.startBarIndex]!;
+        if (Number.isNaN(u) || Number.isNaN(l)) continue;
+        const px = timeScale.indexToCoordinate(idx) * rx;
+        upperPts.push({ x: px, y: priceScale.priceToCoordinate(u) * ry });
+        lowerPts.push({ x: px, y: priceScale.priceToCoordinate(l) * ry });
+      }
+      if (upperPts.length > 1) {
+        ctx.save();
+        ctx.fillStyle = `${ov.color}18`;
+        ctx.beginPath();
+        ctx.moveTo(upperPts[0]!.x, upperPts[0]!.y);
+        for (const p of upperPts) ctx.lineTo(p.x, p.y);
+        for (let i = lowerPts.length - 1; i >= 0; i--) ctx.lineTo(lowerPts[i]!.x, lowerPts[i]!.y);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = `${ov.color}aa`;
+        ctx.lineWidth = Math.max(1, Math.round(ry));
+        ctx.beginPath();
+        for (let i = 0; i < upperPts.length; i++) {
+          if (i === 0) ctx.moveTo(upperPts[i]!.x, upperPts[i]!.y);
+          else ctx.lineTo(upperPts[i]!.x, upperPts[i]!.y);
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        for (let i = 0; i < lowerPts.length; i++) {
+          if (i === 0) ctx.moveTo(lowerPts[i]!.x, lowerPts[i]!.y);
+          else ctx.lineTo(lowerPts[i]!.x, lowerPts[i]!.y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    if (ov.kind === 'supertrend' && ov.extraValues) {
+      ctx.save();
+      ctx.lineWidth = Math.max(1.5, Math.round((ov.lineWidth ?? 2) * ry));
+      for (let idx = start + 1; idx <= end; idx++) {
+        const v0 = ov.values[idx - 1 - ov.startBarIndex]!;
+        const v1 = ov.values[idx - ov.startBarIndex]!;
+        const d0 = ov.extraValues[idx - 1 - ov.startBarIndex]!;
+        const d1 = ov.extraValues[idx - ov.startBarIndex]!;
+        if (Number.isNaN(v0) || Number.isNaN(v1) || d0 !== d1) continue;
+        ctx.strokeStyle = d1 > 0 ? theme.upCandle : theme.downCandle;
+        ctx.beginPath();
+        ctx.moveTo(timeScale.indexToCoordinate(idx - 1) * rx, priceScale.priceToCoordinate(v0) * ry);
+        ctx.lineTo(timeScale.indexToCoordinate(idx) * rx, priceScale.priceToCoordinate(v1) * ry);
+        ctx.stroke();
+      }
+      ctx.restore();
+      continue;
+    }
+
+    // Standard line / basis line
+    ctx.save();
+    ctx.strokeStyle = ov.color;
+    ctx.lineWidth = Math.max(1, Math.round((ov.lineWidth ?? 1.5) * ry));
+    ctx.beginPath();
+    let started = false;
+    for (let idx = start; idx <= end; idx++) {
+      const v = ov.values[idx - ov.startBarIndex]!;
+      if (Number.isNaN(v)) {
+        started = false;
+        continue;
+      }
+      const px = timeScale.indexToCoordinate(idx) * rx;
+      const py = priceScale.priceToCoordinate(v) * ry;
+      if (!started) {
+        ctx.moveTo(px, py);
+        started = true;
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawPriceSeries(

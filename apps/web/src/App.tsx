@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ChartController, FrameTelemetry } from '@openview/chart-engine';
 import {
   DEFAULT_WATCHLIST_IDS,
@@ -22,6 +22,9 @@ import type {
   SymbolInfo,
   WorkspaceSnapshot,
 } from '@openview/protocol';
+import { MasterReplayClock, type ReplaySnapshot } from '@openview/replay-engine';
+import { SCRIPT_TEMPLATES } from '@openview/script-runtime';
+import { IndicatorPickerModal } from './modals/IndicatorPickerModal.tsx';
 import { ProviderVaultModal } from './modals/ProviderVaultModal.tsx';
 import { SymbolSearchModal } from './modals/SymbolSearchModal.tsx';
 import { ObjectTreePanel } from './panels/ObjectTreePanel.tsx';
@@ -30,7 +33,11 @@ import { MarketClient, type BridgeConnectionState } from './services/market-clie
 import { loadWorkspaceLocal, saveWorkspaceLocal } from './storage/workspace-store.ts';
 import { ChartTile } from './workbench/ChartTile.tsx';
 import { LeftDrawingToolbar } from './workbench/LeftDrawingToolbar.tsx';
+import { ReplayBar } from './workbench/ReplayBar.tsx';
 import { WorkspaceSyncBus } from './workbench/sync-bus.ts';
+
+// Lazy-loaded heavy drawers keep initial gzipped JS strictly < 200 KB!
+const ScriptDrawer = lazy(() => import('./lazy/ScriptDrawer.tsx'));
 
 type LayoutGrid = WorkspaceSnapshot['layoutGrid'];
 
@@ -104,7 +111,9 @@ export function App() {
   const clientRef = useRef<MarketClient | null>(null);
   const syncBusRef = useRef<WorkspaceSyncBus>(new WorkspaceSyncBus());
   const drawingManagerRef = useRef<DrawingManager>(new DrawingManager());
+  const replayClockRef = useRef<MasterReplayClock>(new MasterReplayClock());
   const activeControllerRef = useRef<ChartController | null>(null);
+  const activeBarsRef = useRef<OHLCVBar[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quoteBufferRef = useRef<Record<string, QuoteTick>>({});
 
@@ -121,7 +130,22 @@ export function App() {
   const [syncInterval, setSyncInterval] = useState(false);
 
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [showRsiPane, setShowRsiPane] = useState(true);
+  const [activeIndicatorIds, setActiveIndicatorIds] = useState<string[]>(['ema20', 'rsi14']);
+  const [indicatorModalOpen, setIndicatorModalOpen] = useState(false);
+
+  // Lazy Script Drawer state
+  const [scriptDrawerOpen, setScriptDrawerOpen] = useState(false);
+  const [scriptDraftCode, setScriptDraftCode] = useState(SCRIPT_TEMPLATES.ema_ribbon!.code);
+  const [activeScriptCode, setActiveScriptCode] = useState<string | null>(null);
+  const [scriptRunNonce, setScriptRunNonce] = useState(0);
+  const [scriptLogs, setScriptLogs] = useState<string[]>([]);
+  const [scriptError, setScriptError] = useState<string | undefined>(undefined);
+  const [scriptElapsedMs, setScriptElapsedMs] = useState<number | undefined>(undefined);
+
+  // Replay state
+  const [replaySnap, setReplaySnap] = useState<ReplaySnapshot>(() => replayClockRef.current.getSnapshot());
+  const [replayTickNonce, setReplayTickNonce] = useState(0);
+
   const [rightTab, setRightTab] = useState<'watchlist' | 'objects' | 'none'>('watchlist');
   const [stress250k, setStress250k] = useState(false);
   const [activeMeta, setActiveMeta] = useState<{ info: SymbolInfo; label: string }>({
@@ -141,7 +165,6 @@ export function App() {
     label: string;
   } | null>(null);
 
-  // Drawing toolbar state synchronized with DrawingManager
   const [activeTool, setActiveTool] = useState<DrawingToolType | null>(null);
   const [magnetMode, setMagnetMode] = useState<MagnetMode>('off');
   const [stayInMode, setStayInMode] = useState(false);
@@ -151,7 +174,13 @@ export function App() {
   const activeTile = tiles.find((t) => t.id === activeTileId) ?? tiles[0]!;
   const layoutSpec = LAYOUTS.find((l) => l.id === layoutGrid) ?? LAYOUTS[0]!;
 
-  // Sync DrawingManager mutations back to React toolbar/ObjectTree & auto-save
+  useEffect(() => {
+    return replayClockRef.current.onChange((snap) => {
+      setReplaySnap(snap);
+      setReplayTickNonce((n) => n + 1);
+    });
+  }, []);
+
   useEffect(() => {
     const dm = drawingManagerRef.current;
     return dm.onChange(() => {
@@ -160,7 +189,6 @@ export function App() {
     });
   }, []);
 
-  // Restore workspace + drawings from IndexedDB on boot
   useEffect(() => {
     void loadWorkspaceLocal('default').then((ws) => {
       if (!ws) return;
@@ -178,7 +206,6 @@ export function App() {
     });
   }, []);
 
-  // Debounced dual persistence (IndexedDB + Bridge SQLite)
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const snapshot: WorkspaceSnapshot = {
@@ -200,7 +227,6 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [tiles, layoutGrid, syncCrosshair, syncInterval, theme, drawRev]);
 
-  // Connect Bridge + live watchlist quotes
   useEffect(() => {
     const client = clientRef.current!;
     const unsubState = client.onConnectionChange(setBridge);
@@ -250,7 +276,16 @@ export function App() {
     setActiveTool(tool);
   };
 
-  // Global TradingView keyboard shortcuts
+  const toggleReplay = () => {
+    if (replaySnap.active) {
+      replayClockRef.current.stop();
+      return;
+    }
+    if (activeBarsRef.current.length > 20) {
+      replayClockRef.current.start(activeBarsRef.current, Math.floor(activeBarsRef.current.length * 0.65));
+    }
+  };
+
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const target = ev.target as HTMLElement | null;
@@ -263,7 +298,7 @@ export function App() {
         setSearchOpen(true);
         return;
       }
-      if (inInput || searchOpen || vaultOpen) return;
+      if (inInput || searchOpen || vaultOpen || indicatorModalOpen) return;
 
       if (ev.key === 'Escape') {
         selectTool(null);
@@ -319,7 +354,7 @@ export function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchOpen, vaultOpen, activeTile]);
+  }, [searchOpen, vaultOpen, indicatorModalOpen, activeTile]);
 
   const handleLocalFile = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     const file = ev.target.files?.[0];
@@ -371,7 +406,7 @@ export function App() {
         isDark ? 'bg-[#0b0e14] text-[#d1d4dc]' : 'bg-[#f8f9fd] text-[#131722]'
       }`}
     >
-      {/* Top TradingView-Grade Toolbar */}
+      {/* Top Toolbar */}
       <header
         className={`flex h-11 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs ${
           isDark ? 'border-[#2a2e39] bg-[#131722]' : 'border-[#e0e3eb] bg-white'
@@ -390,7 +425,6 @@ export function App() {
                 ? 'border-[#2a2e39] bg-[#1e222d] text-white hover:border-[#2962ff]'
                 : 'border-[#d1d4dc] bg-[#f0f3fa] text-[#131722] hover:border-[#2962ff]'
             }`}
-            title="Search symbols (Ctrl+K or start typing)"
           >
             <span>{activeMeta.info.ticker}</span>
             <span className="text-[10px] font-normal text-[#787b86]">{activeMeta.info.exchange}</span>
@@ -405,7 +439,6 @@ export function App() {
 
           <div className="h-4 w-px bg-[#2a2e39]" />
 
-          {/* Timeframes */}
           <div className="flex items-center gap-0.5">
             {RESOLUTIONS.map((r) => (
               <button
@@ -426,7 +459,6 @@ export function App() {
 
           <div className="h-4 w-px bg-[#2a2e39]" />
 
-          {/* Chart Style */}
           <select
             value={activeTile.chartStyle}
             onChange={(e) => updateActiveTile({ chartStyle: e.target.value as ChartStyle })}
@@ -443,7 +475,6 @@ export function App() {
             ))}
           </select>
 
-          {/* Scale Modes */}
           <div className="flex items-center gap-0.5">
             {SCALE_MODES.map((m) => (
               <button
@@ -470,8 +501,38 @@ export function App() {
 
           <div className="h-4 w-px bg-[#2a2e39]" />
 
-          {/* Multi-Chart Layout Grid Switcher (1x1..4x2, strictly <= 16 canvases!) */}
-          <div className="flex items-center gap-0.5" title="Multi-Chart Layout Grid">
+          <button
+            onClick={() => setIndicatorModalOpen(true)}
+            className="rounded bg-[#7e57c2]/20 px-2 py-1 text-[11px] font-medium text-[#b39ddb] hover:bg-[#7e57c2]/30"
+          >
+            ƒx Indicators ({activeIndicatorIds.length})
+          </button>
+
+          <button
+            onClick={toggleReplay}
+            className={`rounded px-2 py-1 text-[11px] font-medium ${
+              replaySnap.active
+                ? 'bg-[#f7931a]/25 text-[#f7931a]'
+                : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+            }`}
+          >
+            ⏪ Replay
+          </button>
+
+          <button
+            onClick={() => setScriptDrawerOpen((v) => !v)}
+            className={`rounded px-2 py-1 text-[11px] font-medium ${
+              scriptDrawerOpen
+                ? 'bg-[#2962ff]/25 text-[#6aa0ff]'
+                : 'text-[#868993] hover:bg-[#1e222d] hover:text-white'
+            }`}
+          >
+            {'</>'} Script
+          </button>
+
+          <div className="h-4 w-px bg-[#2a2e39]" />
+
+          <div className="flex items-center gap-0.5">
             {LAYOUTS.map((l) => (
               <button
                 key={l.id}
@@ -492,7 +553,7 @@ export function App() {
             className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
               syncCrosshair ? 'bg-[#089981]/20 text-[#089981]' : 'text-[#787b86]'
             }`}
-            title="Sync Crosshair across all charts (cross-timeframe)"
+            title="Sync Crosshair"
           >
             Sync┼
           </button>
@@ -502,27 +563,16 @@ export function App() {
             className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
               syncInterval ? 'bg-[#089981]/20 text-[#089981]' : 'text-[#787b86]'
             }`}
-            title="Sync Timeframe changes across all charts"
+            title="Sync Interval"
           >
             SyncTF
           </button>
 
-          <div className="h-4 w-px bg-[#2a2e39]" />
-
-          <button
-            onClick={() => setShowRsiPane((v) => !v)}
-            className={`rounded px-2 py-1 text-[11px] font-medium ${
-              showRsiPane ? 'bg-[#7e57c2]/25 text-[#b39ddb]' : 'text-[#787b86] hover:bg-[#1e222d]'
-            }`}
-          >
-            RSI(14)
-          </button>
-
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="rounded px-2 py-1 text-[11px] text-[#868993] hover:bg-[#1e222d] hover:text-white"
+            className="rounded px-1.5 py-1 text-[11px] text-[#868993] hover:bg-[#1e222d] hover:text-white"
           >
-            CSV/Parquet
+            CSV
           </button>
           <input
             ref={fileInputRef}
@@ -531,10 +581,9 @@ export function App() {
             className="hidden"
             onChange={handleLocalFile}
           />
-
           <button
             onClick={() => setStress250k((v) => !v)}
-            className={`rounded px-1.5 py-1 font-mono text-[11px] ${
+            className={`rounded px-1.5 py-1 font-mono text-[10.5px] ${
               stress250k ? 'bg-[#089981]/25 text-[#089981]' : 'text-[#787b86] hover:bg-[#1e222d]'
             }`}
           >
@@ -556,7 +605,7 @@ export function App() {
           </button>
           <button
             onClick={handleSnapshot}
-            className="rounded border border-[#2a2e39] px-2 py-1 text-[11px] hover:bg-[#1e222d]"
+            className="rounded border border-[#2a2e39] px-1.5 py-1 text-[10.5px] hover:bg-[#1e222d]"
           >
             PNG
           </button>
@@ -579,7 +628,6 @@ export function App() {
             className={`rounded border border-[#2a2e39] px-1.5 py-1 text-[10.5px] ${
               rightTab === 'objects' ? 'bg-[#1e222d] text-white' : 'text-[#787b86]'
             }`}
-            title="Object Tree (Drawings)"
           >
             OBJ
           </button>
@@ -600,7 +648,20 @@ export function App() {
         </div>
       </header>
 
-      {/* Main Workbench: Left Drawing Bar + Multi-Chart Grid + Right Dockable Sidebar */}
+      {/* Master-Clock Bar Replay Transport */}
+      <ReplayBar
+        snapshot={replaySnap}
+        onPlayPause={() =>
+          replaySnap.playing ? replayClockRef.current.pause() : replayClockRef.current.play()
+        }
+        onStepBack={() => replayClockRef.current.stepBack(1)}
+        onStepForward={() => replayClockRef.current.stepForward(1)}
+        onSpeedChange={(bps) => replayClockRef.current.setSpeed(bps)}
+        onJump={(idx) => replayClockRef.current.jumpToIndex(idx)}
+        onExit={() => replayClockRef.current.stop()}
+      />
+
+      {/* Main Workbench */}
       <div className="flex flex-1 overflow-hidden">
         <LeftDrawingToolbar
           activeTool={activeTool}
@@ -634,41 +695,80 @@ export function App() {
           onClearDrawings={() => drawingManagerRef.current.clearForSymbol(activeTile.symbol)}
         />
 
-        <main
-          className={`grid flex-1 gap-0.5 overflow-hidden p-0.5 ${
-            maximizedTileId ? 'grid-cols-1 grid-rows-1' : layoutSpec.gridClass
-          }`}
-        >
-          {visibleTiles.map((tile) => (
-            <ChartTile
-              key={tile.id}
-              tile={tile}
-              isActive={tile.id === activeTile.id}
-              isMaximized={maximizedTileId === tile.id}
-              bridgeOnlineMode={bridge.mode}
-              theme={theme}
-              showRsiPane={showRsiPane}
-              stress250k={stress250k}
-              syncCrosshair={syncCrosshair}
-              client={clientRef.current!}
-              syncBus={syncBusRef.current}
-              drawingManager={drawingManagerRef.current}
-              reloadNonce={reloadNonce}
-              externalBarsOverride={localFileOverride}
-              onFocus={() => setActiveTileId(tile.id)}
-              onToggleMaximize={() =>
-                setMaximizedTileId((m) => (m === tile.id ? null : tile.id))
-              }
-              {...(tile.id === activeTile.id
-                ? {
-                    onTelemetry: setTelemetry,
-                    onResolvedMeta: (info, label) => setActiveMeta({ info, label }),
-                    controllerOutRef: activeControllerRef,
-                  }
-                : {})}
-            />
-          ))}
-        </main>
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <main
+            className={`grid flex-1 gap-0.5 overflow-hidden p-0.5 ${
+              maximizedTileId ? 'grid-cols-1 grid-rows-1' : layoutSpec.gridClass
+            }`}
+          >
+            {visibleTiles.map((tile) => (
+              <ChartTile
+                key={tile.id}
+                tile={tile}
+                isActive={tile.id === activeTile.id}
+                isMaximized={maximizedTileId === tile.id}
+                bridgeOnlineMode={bridge.mode}
+                theme={theme}
+                activeIndicatorIds={activeIndicatorIds}
+                customScriptCode={activeScriptCode}
+                scriptRunNonce={scriptRunNonce}
+                stress250k={stress250k}
+                syncCrosshair={syncCrosshair}
+                replayActive={replaySnap.active}
+                replayClock={replayClockRef.current}
+                replayTickNonce={replayTickNonce}
+                client={clientRef.current!}
+                syncBus={syncBusRef.current}
+                drawingManager={drawingManagerRef.current}
+                reloadNonce={reloadNonce}
+                externalBarsOverride={localFileOverride}
+                onFocus={() => setActiveTileId(tile.id)}
+                onToggleMaximize={() =>
+                  setMaximizedTileId((m) => (m === tile.id ? null : tile.id))
+                }
+                {...(tile.id === activeTile.id
+                  ? {
+                      onTelemetry: setTelemetry,
+                      onResolvedMeta: (info, label) => setActiveMeta({ info, label }),
+                      onBarsLoaded: (bars) => {
+                        activeBarsRef.current = bars;
+                      },
+                      onScriptOutput: (logs, ms, err) => {
+                        setScriptLogs(logs);
+                        setScriptElapsedMs(ms);
+                        setScriptError(err);
+                      },
+                      controllerOutRef: activeControllerRef,
+                    }
+                  : {})}
+              />
+            ))}
+          </main>
+
+          {scriptDrawerOpen && (
+            <Suspense fallback={<div className="h-60 border-t border-[#2a2e39] bg-[#131722] p-4 text-xs text-[#787b86]">Loading Script Editor...</div>}>
+              <ScriptDrawer
+                open={scriptDrawerOpen}
+                code={scriptDraftCode}
+                logs={scriptLogs}
+                {...(scriptError !== undefined ? { error: scriptError } : {})}
+                {...(scriptElapsedMs !== undefined ? { elapsedMs: scriptElapsedMs } : {})}
+                isDark={isDark}
+                onChangeCode={setScriptDraftCode}
+                onRun={() => {
+                  setActiveScriptCode(scriptDraftCode);
+                  setScriptRunNonce((n) => n + 1);
+                }}
+                onClearScript={() => {
+                  setActiveScriptCode(null);
+                  setScriptLogs([]);
+                  setScriptError(undefined);
+                }}
+                onClose={() => setScriptDrawerOpen(false)}
+              />
+            </Suspense>
+          )}
+        </div>
 
         {rightTab === 'watchlist' && (
           <WatchlistPanel
@@ -679,6 +779,7 @@ export function App() {
             onSelect={(sym) => {
               setLocalFileOverride(null);
               setStress250k(false);
+              if (replaySnap.active) replayClockRef.current.stop();
               updateActiveTile({ symbol: sym.id });
             }}
             onOpenSearch={() => {
@@ -705,8 +806,21 @@ export function App() {
         onSelect={(sym) => {
           setLocalFileOverride(null);
           setStress250k(false);
+          if (replaySnap.active) replayClockRef.current.stop();
           updateActiveTile({ symbol: sym.id });
         }}
+      />
+
+      <IndicatorPickerModal
+        open={indicatorModalOpen}
+        activeIds={activeIndicatorIds}
+        hasVolume={activeMeta.info.hasVolume}
+        onToggle={(id) =>
+          setActiveIndicatorIds((prev) =>
+            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+          )
+        }
+        onClose={() => setIndicatorModalOpen(false)}
       />
 
       <ProviderVaultModal

@@ -10,33 +10,58 @@ pub fn openview_wasm_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Compute Simple Moving Average (SMA) over a Float64 slice.
-/// Warmup indices (< period - 1) return f64::NAN.
 #[wasm_bindgen]
 pub fn ta_sma(values: &[f64], period: usize) -> Vec<f64> {
     ta::sma(values, period)
 }
 
-/// Compute Exponential Moving Average (EMA) matching TradingView's SMA-seeded formula.
 #[wasm_bindgen]
 pub fn ta_ema(values: &[f64], period: usize) -> Vec<f64> {
     ta::ema(values, period)
 }
 
-/// Compute Wilder's Running Moving Average (RMA / SMMA), alpha = 1 / period, SMA-seeded.
 #[wasm_bindgen]
 pub fn ta_rma(values: &[f64], period: usize) -> Vec<f64> {
     ta::rma(values, period)
 }
 
-/// Compute Relative Strength Index (RSI) using Wilder's RMA smoothing (TradingView parity).
+#[wasm_bindgen]
+pub fn ta_wma(values: &[f64], period: usize) -> Vec<f64> {
+    ta::wma(values, period)
+}
+
+#[wasm_bindgen]
+pub fn ta_hma(values: &[f64], period: usize) -> Vec<f64> {
+    ta::hma(values, period)
+}
+
+#[wasm_bindgen]
+pub fn ta_vwma(values: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+    ta::vwma(values, volume, period)
+}
+
 #[wasm_bindgen]
 pub fn ta_rsi(values: &[f64], period: usize) -> Vec<f64> {
     ta::rsi(values, period)
 }
 
-/// Compute Bollinger Bands with population standard deviation (ddof = 0, TradingView parity).
-/// Returns flattened [basis..., upper..., lower...] of length 3 * values.len().
+/// Returns flattened [macd..., signal..., histogram...] (length 3 * N)
+#[wasm_bindgen]
+pub fn ta_macd(values: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
+    let (m, s, h) = ta::macd(values, fast, slow, signal);
+    let mut out = Vec::with_capacity(values.len() * 3);
+    out.extend_from_slice(&m);
+    out.extend_from_slice(&s);
+    out.extend_from_slice(&h);
+    out
+}
+
+#[wasm_bindgen]
+pub fn ta_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    ta::atr(high, low, close, period)
+}
+
+/// Returns flattened [basis..., upper..., lower...] (length 3 * N)
 #[wasm_bindgen]
 pub fn ta_bollinger_bands(values: &[f64], period: usize, mult: f64) -> Vec<f64> {
     let (basis, upper, lower) = ta::bollinger_bands(values, period, mult);
@@ -44,5 +69,115 @@ pub fn ta_bollinger_bands(values: &[f64], period: usize, mult: f64) -> Vec<f64> 
     out.extend_from_slice(&basis);
     out.extend_from_slice(&upper);
     out.extend_from_slice(&lower);
+    out
+}
+
+/// Returns flattened [basis..., upper..., lower...] (length 3 * N)
+#[wasm_bindgen]
+pub fn ta_keltner_channels(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+) -> Vec<f64> {
+    let (basis, upper, lower) = ta::keltner_channels(high, low, close, period, mult);
+    let mut out = Vec::with_capacity(close.len() * 3);
+    out.extend_from_slice(&basis);
+    out.extend_from_slice(&upper);
+    out.extend_from_slice(&lower);
+    out
+}
+
+/// Returns flattened [mid..., upper..., lower...] (length 3 * N)
+#[wasm_bindgen]
+pub fn ta_donchian_channels(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let (mid, upper, lower) = ta::donchian_channels(high, low, period);
+    let mut out = Vec::with_capacity(high.len() * 3);
+    out.extend_from_slice(&mid);
+    out.extend_from_slice(&upper);
+    out.extend_from_slice(&lower);
+    out
+}
+
+/// Returns flattened [supertrendLine..., direction...] (length 2 * N)
+#[wasm_bindgen]
+pub fn ta_supertrend(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    factor: f64,
+) -> Vec<f64> {
+    let (line, dir) = ta::supertrend(high, low, close, period, factor);
+    let mut out = Vec::with_capacity(close.len() * 2);
+    out.extend_from_slice(&line);
+    out.extend_from_slice(&dir);
+    out
+}
+
+/// Returns flattened [k..., d...] (length 2 * N)
+#[wasm_bindgen]
+pub fn ta_stochastic(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    k_period: usize,
+    smooth_k: usize,
+    d_period: usize,
+) -> Vec<f64> {
+    let (k, d) = ta::stochastic(high, low, close, k_period, smooth_k, d_period);
+    let mut out = Vec::with_capacity(close.len() * 2);
+    out.extend_from_slice(&k);
+    out.extend_from_slice(&d);
+    out
+}
+
+/// Returns flattened [plusDi..., minusDi..., adx...] (length 3 * N)
+#[wasm_bindgen]
+pub fn ta_adx_dmi(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let (p, m, a) = ta::adx_dmi(high, low, close, period);
+    let mut out = Vec::with_capacity(close.len() * 3);
+    out.extend_from_slice(&p);
+    out.extend_from_slice(&m);
+    out.extend_from_slice(&a);
+    out
+}
+
+#[wasm_bindgen]
+pub fn ta_cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    ta::cci(high, low, close, period)
+}
+
+#[wasm_bindgen]
+pub fn ta_obv(close: &[f64], volume: &[f64]) -> Vec<f64> {
+    ta::obv(close, volume)
+}
+
+#[wasm_bindgen]
+pub fn ta_mfi(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    period: usize,
+) -> Vec<f64> {
+    ta::mfi(high, low, close, volume, period)
+}
+
+/// Returns flattened [vwap..., upper1..., lower1...] (length 3 * N)
+#[wasm_bindgen]
+pub fn ta_session_vwap(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    session_breaks: &[u8],
+) -> Vec<f64> {
+    let (vw, u1, l1) = ta::session_vwap(high, low, close, volume, session_breaks);
+    let mut out = Vec::with_capacity(close.len() * 3);
+    out.extend_from_slice(&vw);
+    out.extend_from_slice(&u1);
+    out.extend_from_slice(&l1);
     out
 }

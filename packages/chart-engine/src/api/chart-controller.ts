@@ -22,6 +22,7 @@ import {
   renderBaseLayer,
   renderTopLayer,
   type CrosshairState,
+  type MainOverlayPlot,
   type SubPaneSeriesPlot,
 } from '../renderers/pane-renderers.ts';
 import { DARK_THEME, LIGHT_THEME, type ChartTheme } from '../renderers/theme.ts';
@@ -59,6 +60,7 @@ export class ChartController {
 
   private readonly paneSpecs: PaneSpec[] = [{ id: 'main', weight: 1, minHeightPx: 120 }];
   private readonly subPanes = new Map<string, { priceScale: SymlogPriceScale; plots: SubPaneSeriesPlot[] }>();
+  private mainOverlays: MainOverlayPlot[] = [];
 
   private canvasPair: TileCanvasPair | null = null;
   private gestures: GestureController | null = null;
@@ -300,6 +302,11 @@ export class ChartController {
     this.scheduler.invalidate(DirtyFlag.FULL | DirtyFlag.CURSOR);
   }
 
+  setMainOverlays(overlays: MainOverlayPlot[]): void {
+    this.mainOverlays = overlays;
+    this.scheduler.invalidate(DirtyFlag.FULL);
+  }
+
   addSubPane(id: string, weight = 0.28, precision = 2): void {
     if (this.subPanes.has(id)) return;
     this.paneSpecs.push({ id, weight, minHeightPx: 72 });
@@ -527,6 +534,7 @@ export class ChartController {
         timeScale: this.timeScale,
         mainPriceScale: this.mainPriceScale,
         calendar: this.calendar,
+        mainOverlays: this.mainOverlays,
         subPanes: this.subPanes,
         ...(this.onBaseOverlay ? { onMainPaneBaseOverlay: this.onBaseOverlay } : {}),
       });
