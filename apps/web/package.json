@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@openview/chart-engine": "0.1.0",
     "@openview/protocol": "0.1.0",
     "@openview/script-runtime": "0.1.0",
     "react": "^19.1.0",

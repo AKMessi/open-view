@@ -1,0 +1,17 @@
+{
+  "name": "@openview/chart-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@openview/protocol": "0.1.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
