@@ -109,13 +109,15 @@ export async function createBridgeServer(
   const webPort = options.webPort ?? 5173;
   const bridgeMode = options.bridgeMode ?? 'local';
 
+  const sealer = options.sealer ?? defaultSealer();
   const dataDir = path.resolve(process.cwd(), '.data');
   const dbPath = options.dbPath ?? path.join(dataDir, 'openview.sqlite');
-  const vaultKeyPath = options.vaultKeyPath ?? path.join(dataDir, 'vault.master.bin');
+  const vaultKeyPath =
+    options.vaultKeyPath ?? path.join(dataDir, `vault.master.${sealer.mode}.bin`);
 
   const policy = options.securityPolicy ?? createDefaultSecurityPolicy(port, webPort);
   const sessionGuard = new SessionGuard();
-  const vault = new CredentialVault(vaultKeyPath, options.sealer ?? defaultSealer());
+  const vault = new CredentialVault(vaultKeyPath, sealer);
   vault.unlockOrInitialize();
 
   const db = new DbWorkerClient(dbPath);

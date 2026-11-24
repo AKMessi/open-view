@@ -10,8 +10,18 @@ import type {
   WsServerMessage,
 } from '@openview/protocol';
 
-const BRIDGE_HTTP = 'http://127.0.0.1:4001';
-const BRIDGE_WS = 'ws://127.0.0.1:4001/ws';
+const configuredBridgePort = (import.meta as { env?: Record<string, string | undefined> }).env
+  ?.VITE_BRIDGE_PORT;
+const isSelfHostedSameOrigin =
+  typeof window !== 'undefined' &&
+  !configuredBridgePort &&
+  window.location.origin.startsWith('http') &&
+  window.location.port !== '5173' &&
+  window.location.port !== '4173';
+const BRIDGE_HTTP = isSelfHostedSameOrigin
+  ? window.location.origin
+  : `http://127.0.0.1:${configuredBridgePort ?? '4001'}`;
+const BRIDGE_WS = BRIDGE_HTTP.replace(/^http/, 'ws') + '/ws';
 
 export interface ProviderStatusInfo {
   id: string;
